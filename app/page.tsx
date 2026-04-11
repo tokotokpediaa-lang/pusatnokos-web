@@ -2359,7 +2359,10 @@ export default function App() {
       )}
 
       <div className="flex-1 w-full h-full relative">
-        {authLoading ? (
+        {/* ✅ FIX LCP: Landing/login/register langsung render tanpa tunggu Firebase.
+            Visitor baru tidak perlu login, tidak perlu nunggu authLoading selesai.
+            Kalau Firebase selesai dan user sudah login, navigate() redirect ke dashboard. */}
+        {authLoading && currentPage !== 'landing' && currentPage !== 'login' && currentPage !== 'register' ? (
           <AppSkeleton />
         ) : currentPage === 'pin_verify' ? (
           <PinVerifyPage user={user} navigate={navigate} showToast={showToast} />
