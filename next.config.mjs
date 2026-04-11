@@ -15,6 +15,8 @@ const ContentSecurityPolicy = [
     "https://securetoken.googleapis.com",
     "https://5sim.net",
     "https://api.iconify.design",
+    "https://api.sms-activate.guru",
+    "https://paymenku.com",
   ].join(' '),
   [
     "img-src 'self' data: blob:",
@@ -60,11 +62,49 @@ const nextConfig = {
     ignoreDuringBuilds: true,
   },
 
+  // ✅ Optimasi bundle — tree-shake lucide-react & firebase agar hanya
+  // komponen/fungsi yang benar-benar dipakai yang masuk ke bundle client.
+  experimental: {
+    optimizePackageImports: [
+      'lucide-react',
+      'firebase/auth',
+      'firebase/firestore',
+      'firebase/app',
+    ],
+  },
+
+  // ✅ Kompresi aktif
+  compress: true,
+
+  // ✅ Powered-by header dihapus (security + ukuran response)
+  poweredByHeader: false,
+
   async headers() {
     return [
       {
         source: '/(.*)',
         headers: securityHeaders,
+      },
+      // ✅ Cache agresif untuk static assets (JS, CSS, font, gambar)
+      // Vercel otomatis kasih hash di filename jadi aman di-cache selamanya
+      {
+        source: '/_next/static/(.*)',
+        headers: [
+          {
+            key: 'Cache-Control',
+            value: 'public, max-age=31536000, immutable',
+          },
+        ],
+      },
+      // ✅ Cache untuk public assets (favicon, logo, og-image)
+      {
+        source: '/(.*)\\.(ico|png|jpg|jpeg|webp|svg|woff|woff2)',
+        headers: [
+          {
+            key: 'Cache-Control',
+            value: 'public, max-age=86400, stale-while-revalidate=604800',
+          },
+        ],
       },
     ];
   },
