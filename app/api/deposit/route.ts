@@ -206,9 +206,13 @@ export async function POST(request: Request) {
     await rateLimitRef.set({ timestamp: Date.now() });
 
     // ── 5. Buat tiket deposit ────────────────────────────────────────────────
-    const newTicketRef = adminDb.collection('users').doc(userId).collection('transactions').doc();
+    const userName = userData.name ?? userData.displayName ?? userEmail;
+    const newTicketRef = adminDb.collection('transactions').doc();
     await newTicketRef.set({
-      userId, type: 'deposit', amount,
+      userId,
+      userEmail,
+      userName,
+      type: 'deposit', amount,
       method: method as AllowedMethod,
       desc: 'Deposit via ' + method,
       status: 'pending',
@@ -219,7 +223,6 @@ export async function POST(request: Request) {
     // ── 6. Notifikasi Telegram ke admin (non-blocking) ───────────────────────
     // Dijalankan tanpa await agar tidak delay response ke user jika Telegram lambat.
     // Error tetap dicatat di console server log.
-    const userName = userData.name ?? userData.displayName ?? userEmail;
     sendTelegramNotification(userName, userEmail, userId, amount, method as AllowedMethod, newTicketRef.id)
       .catch(err => console.error('[deposit/tg] Uncaught error:', err));
 
