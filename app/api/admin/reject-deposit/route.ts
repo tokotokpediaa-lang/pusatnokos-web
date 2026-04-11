@@ -1,15 +1,13 @@
 // app/api/admin/reject-deposit/route.ts
 // FIXES APPLIED:
-//  [MEDIUM] Validasi format txId dan userId dengan regex ketat (sama seperti approve-deposit)
-//  [BUG FIX] Pengecekan txData.userId dibuat opsional — field ini mungkin tidak tersimpan
-//            dalam dokumen Firestore (hanya ada di path dokumen), sehingga pengecekan keras
-//            sebelumnya selalu gagal dengan error "Mismatch" meskipun data valid.
+//  [MEDIUM] Validasi format txId dan userId dengan regex ketat
+//  [BUG FIX] Pengecekan txData.userId dibuat opsional
+//  [BUG FIX] Path transaksi dipindah ke root collection 'transactions'
 
 import { NextResponse } from 'next/server';
 import * as admin from 'firebase-admin';
 import { adminAuth, adminDb } from '../../../../lib/firebaseAdmin';
 
-// ✅ FIX [MEDIUM]: Regex ketat untuk ID dari request body — konsisten dengan approve-deposit.
 const UID_PATTERN  = /^[a-zA-Z0-9]{20,128}$/;
 const TXID_PATTERN = /^[a-zA-Z0-9_\-]{1,128}$/;
 
@@ -52,7 +50,8 @@ export async function POST(request: Request) {
       return NextResponse.json({ message: 'userId tidak valid.' }, { status: 400 });
     }
 
-    const txRef = adminDb.collection('users').doc(userId).collection('transactions').doc(txId);
+    // ✅ BUG FIX: Pakai root collection 'transactions', bukan subcollection user
+    const txRef = adminDb.collection('transactions').doc(txId);
 
     // ── 4. Proses reject dalam Firestore Transaction (atomic) ─────────────────
     await adminDb.runTransaction(async (t) => {
@@ -66,10 +65,6 @@ export async function POST(request: Request) {
         throw new Error('Transaksi ini sudah diproses sebelumnya.');
       }
 
-      // ✅ BUG FIX: Pengecekan userId dibuat opsional.
-      // Field `userId` mungkin tidak tersimpan dalam dokumen Firestore (hanya ada di
-      // path users/{userId}/transactions/{txId}). Jika field ada, tetap diverifikasi
-      // untuk keamanan. Jika tidak ada, path dokumen sudah menjamin kepemilikan.
       if (txData.userId !== undefined && txData.userId !== userId) {
         throw new Error('Mismatch: transaksi ini bukan milik user yang dimaksud.');
       }

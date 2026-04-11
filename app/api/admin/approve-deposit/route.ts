@@ -2,14 +2,12 @@
 // FIXES APPLIED:
 //  [MEDIUM] Validasi format txId dan userId dengan regex ketat
 //  [LOW]    Komentar diselaraskan dengan kode (totalSpent → totalDeposited)
+//  [BUG FIX] Path transaksi dipindah ke root collection 'transactions'
 
 import { NextResponse } from 'next/server';
 import * as admin from 'firebase-admin';
 import { adminAuth, adminDb } from '../../../../lib/firebaseAdmin';
 
-// ✅ FIX [MEDIUM]: Regex untuk validasi format ID dari request body.
-// Firestore UID Firebase selalu 28 karakter alphanumeric.
-// txId bisa lebih panjang (mis. timestamp-based) tapi tetap dibatasi.
 const UID_PATTERN = /^[a-zA-Z0-9]{20,128}$/;
 const TXID_PATTERN = /^[a-zA-Z0-9_\-]{1,128}$/;
 
@@ -45,8 +43,6 @@ export async function POST(request: Request) {
     const body = await request.json().catch(() => ({}));
     const { txId, userId } = body;
 
-    // ✅ FIX [MEDIUM]: Validasi format dengan regex ketat, bukan hanya typeof + trim.
-    // Sebelumnya string panjang sembarang atau karakter aneh bisa masuk ke Firestore path.
     if (typeof txId !== 'string' || !TXID_PATTERN.test(txId)) {
       return NextResponse.json({ message: 'txId tidak valid.' }, { status: 400 });
     }
@@ -54,7 +50,8 @@ export async function POST(request: Request) {
       return NextResponse.json({ message: 'userId tidak valid.' }, { status: 400 });
     }
 
-    const txRef   = adminDb.collection('users').doc(userId).collection('transactions').doc(txId);
+    // ✅ BUG FIX: Pakai root collection 'transactions', bukan subcollection user
+    const txRef   = adminDb.collection('transactions').doc(txId);
     const userRef = adminDb.collection('users').doc(userId);
 
     // ── 4. Proses approve dalam Firestore Transaction (atomic) ───────────────
@@ -67,12 +64,10 @@ export async function POST(request: Request) {
       const txData   = txDoc.data()!;
       const userData = userDoc.data()!;
 
-      // Idempotency — cegah double-approve
       if (txData.status !== 'pending') {
         throw new Error('Transaksi ini sudah diproses sebelumnya.');
       }
 
-      // Verifikasi kepemilikan transaksi
       if (txData.userId !== userId) {
         throw new Error('Mismatch: transaksi ini bukan milik user yang dimaksud.');
       }
@@ -90,8 +85,6 @@ export async function POST(request: Request) {
 
       t.update(userRef, {
         balance: admin.firestore.FieldValue.increment(amount),
-        // ✅ FIX [LOW]: Komentar header menyebut totalSpent tapi deposit bukan belanja.
-        // Diganti dengan totalDeposited untuk tracking akumulasi deposit secara terpisah.
         totalDeposited: admin.firestore.FieldValue.increment(amount),
       });
     });
