@@ -1,23 +1,18 @@
 'use client';
 
 import dynamic from 'next/dynamic';
-
-// Loading fallback ringan — background gelap supaya tidak ada blank flash
-const PageFallback = () => <div className="min-h-screen bg-[#0a0000]" />;
-const DashFallback = () => <div className="flex-1 min-h-screen bg-[#040101]" />;
-
-const LegalPage        = dynamic(() => import('@/app/components/LegalPage'),        { loading: () => <PageFallback /> });
-const ContactPage      = dynamic(() => import('@/app/components/ContactPage'),      { loading: () => <PageFallback /> });
-const AdminPanelPage   = dynamic(() => import('@/app/components/AdminPanelPage'),   { ssr: false, loading: () => <DashFallback /> });
-const DepositPage      = dynamic(() => import('@/app/components/DepositPage'),      { ssr: false, loading: () => <DashFallback /> });
-const BuyNumberPage    = dynamic(() => import('@/app/components/BuyNumberPage'),    { ssr: false, loading: () => <DashFallback /> });
-const OrderHistoryPage = dynamic(() => import('@/app/components/OrderHistoryPage'), { ssr: false, loading: () => <DashFallback /> });
-const DashHome         = dynamic(() => import('@/app/components/DashComponents'),                                          { ssr: false, loading: () => <DashFallback /> });
-const SettingsPage     = dynamic(() => import('@/app/components/DashComponents').then(m => ({ default: m.SettingsPage })), { ssr: false, loading: () => <DashFallback /> });
-const MutasiPage       = dynamic(() => import('@/app/components/DashComponents').then(m => ({ default: m.MutasiPage })),   { ssr: false, loading: () => <DashFallback /> });
-const AuthPage         = dynamic(() => import('@/app/components/AuthPage'),           { ssr: false, loading: () => <PageFallback /> });
-const PinVerifyPage    = dynamic(() => import('@/app/components/AuthPage').then(m => ({ default: m.PinVerifyPage })),  { ssr: false, loading: () => <PageFallback /> });
-const SetupPinPage     = dynamic(() => import('@/app/components/AuthPage').then(m => ({ default: m.SetupPinPage })),   { ssr: false, loading: () => <PageFallback /> });
+const LegalPage      = dynamic(() => import('@/app/components/LegalPage'));
+const ContactPage    = dynamic(() => import('@/app/components/ContactPage'));
+const AdminPanelPage = dynamic(() => import('@/app/components/AdminPanelPage'), { ssr: false });
+const DepositPage     = dynamic(() => import('@/app/components/DepositPage'),     { ssr: false });
+const BuyNumberPage      = dynamic(() => import('@/app/components/BuyNumberPage'),      { ssr: false });
+const OrderHistoryPage   = dynamic(() => import('@/app/components/OrderHistoryPage'),   { ssr: false });
+const DashHome       = dynamic(() => import('@/app/components/DashComponents'),                                        { ssr: false });
+const SettingsPage   = dynamic(() => import('@/app/components/DashComponents').then(m => ({ default: m.SettingsPage })), { ssr: false });
+const MutasiPage     = dynamic(() => import('@/app/components/DashComponents').then(m => ({ default: m.MutasiPage })),   { ssr: false });
+const AuthPage           = dynamic(() => import('@/app/components/AuthPage'),           { ssr: false });
+const PinVerifyPage      = dynamic(() => import('@/app/components/AuthPage').then(m => ({ default: m.PinVerifyPage })),  { ssr: false });
+const SetupPinPage       = dynamic(() => import('@/app/components/AuthPage').then(m => ({ default: m.SetupPinPage })),   { ssr: false });
 
 import React, { useState, useEffect, useMemo, useRef, useCallback, memo, createContext, useContext } from 'react';
 import { createPortal } from 'react-dom';
@@ -1976,24 +1971,14 @@ export default function App() {
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
-    // ✅ FIX PERF: Sora sudah di-load oleh next/font di layout.tsx — tidak perlu inject ulang.
-    // Hanya inject utility styles (scrollbar, animasi) yang tidak ada di globals.css.
-    const STYLE_ID = 'pn-utility-styles';
-    if (!document.getElementById(STYLE_ID)) {
-      const st = document.createElement('style');
-      st.id = STYLE_ID;
-      st.textContent = [
-        // JetBrains Mono untuk kode
-        `.mono-code,.font-mono{font-family:'JetBrains Mono',monospace!important}`,
-        // Scrollbar custom
-        `.scrollbar-custom::-webkit-scrollbar,.custom-scrollbar::-webkit-scrollbar{width:3px}`,
-        `.scrollbar-custom::-webkit-scrollbar-thumb,.custom-scrollbar::-webkit-scrollbar-thumb{background:rgba(220,38,38,.25);border-radius:9px}`,
-        // Animasi
-        `@keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-6px)}}.animate-float{animation:float 4s ease-in-out infinite}`,
-        `@keyframes pn-pulse{0%,100%{opacity:.6}50%{opacity:1}}.animate-pn-pulse{animation:pn-pulse 2s ease-in-out infinite}`,
-        `@keyframes marquee{0%{transform:translateX(0%)}100%{transform:translateX(-50%)}}.animate-marquee{animation:marquee 18s linear infinite;will-change:transform}.animate-marquee:hover{animation-play-state:paused}`,
-        `.announcement-track{display:flex;width:max-content}`,
-      ].join('');
+    // Inject premium fonts
+    const ids = ['pn-font-preconnect','pn-font-gstatic','pn-font-link','pn-font-style'];
+    if (!document.getElementById(ids[0])) {
+      const lp = document.createElement('link'); lp.id=ids[0]; lp.rel='preconnect'; lp.href='https://fonts.googleapis.com'; document.head.appendChild(lp);
+      const lg = document.createElement('link'); lg.id=ids[1]; lg.rel='preconnect'; lg.href='https://fonts.gstatic.com'; lg.crossOrigin='anonymous'; document.head.appendChild(lg);
+      const lf = document.createElement('link'); lf.id=ids[2]; lf.rel='stylesheet'; lf.href='https://fonts.googleapis.com/css2?family=Sora:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;700&display=swap'; document.head.appendChild(lf);
+      const st = document.createElement('style'); st.id=ids[3];
+      st.textContent = `*,button,input{font-family:'Sora',sans-serif!important}.mono-code,.font-mono{font-family:'JetBrains Mono',monospace!important}.scrollbar-custom::-webkit-scrollbar,.custom-scrollbar::-webkit-scrollbar{width:3px}.scrollbar-custom::-webkit-scrollbar-thumb,.custom-scrollbar::-webkit-scrollbar-thumb{background:rgba(220,38,38,.25);border-radius:9px}@keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-6px)}}.animate-float{animation:float 4s ease-in-out infinite}@keyframes pn-pulse{0%,100%{opacity:.6}50%{opacity:1}}.animate-pn-pulse{animation:pn-pulse 2s ease-in-out infinite}@keyframes marquee{0%{transform:translateX(0%)}100%{transform:translateX(-50%)}}.animate-marquee{animation:marquee 18s linear infinite;will-change:transform}.animate-marquee:hover{animation-play-state:paused}.announcement-track{display:flex;width:max-content}`;
       document.head.appendChild(st);
     }
   }, []);
@@ -2359,10 +2344,7 @@ export default function App() {
       )}
 
       <div className="flex-1 w-full h-full relative">
-        {/* ✅ FIX LCP: Landing/login/register langsung render tanpa tunggu Firebase.
-            Visitor baru tidak perlu login, tidak perlu nunggu authLoading selesai.
-            Kalau Firebase selesai dan user sudah login, navigate() redirect ke dashboard. */}
-        {authLoading && currentPage !== 'landing' && currentPage !== 'login' && currentPage !== 'register' ? (
+        {authLoading ? (
           <AppSkeleton />
         ) : currentPage === 'pin_verify' ? (
           <PinVerifyPage user={user} navigate={navigate} showToast={showToast} />
@@ -2390,7 +2372,44 @@ export default function App() {
 // ==========================================
 // PUBLIC LAYOUT & PAGES
 // ==========================================
-type LegalModalTab = 'terms-id' | 'terms-en' | 'privacy-id' | 'privacy-en';
+
+// ── LegalModal ──────────────────────────────────────────────────────────────
+type LegalModalTabType = 'terms-id' | 'terms-en' | 'privacy-id' | 'privacy-en';
+function LegalModal({ initialTab, onClose }: { initialTab: LegalModalTabType; onClose: () => void }) {
+  const [tab, setTab] = React.useState<LegalModalTabType>(initialTab);
+  return (
+    <div className="fixed inset-0 z-[300] bg-black/80 backdrop-blur-sm flex items-end sm:items-center justify-center px-0 sm:px-4" onClick={onClose}>
+      <div className="bg-[#080000] border border-red-500/20 rounded-t-2xl sm:rounded-2xl w-full sm:max-w-2xl max-h-[85vh] overflow-hidden flex flex-col shadow-[0_0_80px_rgba(0,0,0,0.9)]" onClick={e=>e.stopPropagation()}>
+        <div className="flex items-center justify-between p-5 border-b border-white/5 shrink-0">
+          <div className="flex gap-2 flex-wrap">
+            {([['terms-id','Syarat (ID)'],['terms-en','Terms (EN)'],['privacy-id','Privasi (ID)'],['privacy-en','Privacy (EN)']] as [LegalModalTabType,string][]).map(([t,l])=>(
+              <button key={t} onClick={()=>setTab(t)} className={`text-[11px] font-black px-3 py-1.5 rounded-lg uppercase tracking-widest transition-all ${tab===t?'bg-red-600 text-white':'bg-white/5 text-gray-400 hover:text-white'}`}>{l}</button>
+            ))}
+          </div>
+          <button onClick={onClose} className="text-gray-500 hover:text-white ml-2 shrink-0"><X className="w-5 h-5"/></button>
+        </div>
+        <div className="overflow-y-auto flex-1 p-6 text-gray-400 text-sm leading-relaxed space-y-4">
+          {(tab==='terms-id'||tab==='terms-en') ? (
+            <>
+              <h2 className="text-white font-black text-lg">{tab==='terms-id'?'Syarat & Ketentuan':'Terms & Conditions'}</h2>
+              <p>{tab==='terms-id'?'PusatNokos menyediakan nomor virtual untuk verifikasi OTP. Dengan menggunakan layanan ini, Anda menyetujui ketentuan berikut.':'PusatNokos provides virtual numbers for OTP verification. By using this service, you agree to the following terms.'}</p>
+              <p>{tab==='terms-id'?'Layanan hanya boleh digunakan untuk tujuan yang sah. Penyalahgunaan akan mengakibatkan pemblokiran akun.':'Service may only be used for lawful purposes. Misuse will result in account suspension.'}</p>
+              <p>{tab==='terms-id'?'Saldo yang sudah diisi tidak dapat dikembalikan kecuali karena kegagalan sistem.':'Topped-up balance is non-refundable except due to system failure.'}</p>
+              <p>{tab==='terms-id'?'Refund otomatis diberikan jika OTP tidak masuk dalam batas waktu yang ditentukan.':'Automatic refund is provided if OTP is not received within the specified time limit.'}</p>
+            </>
+          ) : (
+            <>
+              <h2 className="text-white font-black text-lg">{tab==='privacy-id'?'Kebijakan Privasi':'Privacy Policy'}</h2>
+              <p>{tab==='privacy-id'?'Kami mengumpulkan data yang diperlukan untuk menyediakan layanan, termasuk email dan riwayat transaksi.':'We collect data necessary to provide the service, including email and transaction history.'}</p>
+              <p>{tab==='privacy-id'?'Data Anda tidak dijual atau dibagikan kepada pihak ketiga tanpa persetujuan Anda.':'Your data is not sold or shared with third parties without your consent.'}</p>
+              <p>{tab==='privacy-id'?'Kami menggunakan enkripsi untuk melindungi informasi pribadi Anda.':'We use encryption to protect your personal information.'}</p>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function PublicLayout({ currentPage, navigate, showToast, inventory }) {
   const [isScrolled, setIsScrolled] = useState(false);

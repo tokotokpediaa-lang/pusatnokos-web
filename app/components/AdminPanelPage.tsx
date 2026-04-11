@@ -139,6 +139,14 @@ export default memo(function AdminPanelPage({ showToast, isAdmin }) {
   const approvingIds = useRef<Set<string>>(new Set());
   const [userPage, setUserPage] = useState(1);
   const [depositPage, setDepositPage] = useState(1);
+  const [orderPage, setOrderPage] = useState(1);
+  const [orderFilter, setOrderFilter] = useState<'all'|'success'|'canceled'|'active'>('all');
+  const [orderDateFilter, setOrderDateFilter] = useState<'all'|'today'|'week'|'month'>('all');
+  const [orderSearch, setOrderSearch] = useState('');
+  const [selectedOrder, setSelectedOrder] = useState<any>(null);
+  const [userStatusFilter, setUserStatusFilter] = useState<'all'|'active'|'banned'>('all');
+  const [userSort, setUserSort] = useState<'balance'|'spent'|'joined'>('joined');
+  const [selectedUserHistory, setSelectedUserHistory] = useState<any>(null);
   const itemsPerPage = 10;
 
   const getToken = async (): Promise<string | null> => {
@@ -230,12 +238,16 @@ export default memo(function AdminPanelPage({ showToast, isAdmin }) {
       const ordGroupRef = collectionGroup(db, "orders");
       const ordQuery = query(ordGroupRef, where("timestamp",">=",weekAgo), orderBy("timestamp","desc"), limit(300));
       unsubscribeOrders = onSnapshot(ordQuery, (snap) => {
-        setDbOrders(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+        const list = snap.docs.map(d => ({ id: d.id, userId: d.ref.parent.parent?.id, ...d.data() }));
+        list.sort((a: any, b: any) => (safeTs(b.timestamp)||0) - (safeTs(a.timestamp)||0));
+        setDbOrders(list);
       }, () => {
         try {
           const fb = query(ordGroupRef, limit(300));
           unsubscribeOrders = onSnapshot(fb, (snap) => {
-            setDbOrders(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+            const list = snap.docs.map(d => ({ id: d.id, userId: d.ref.parent.parent?.id, ...d.data() }));
+            list.sort((a: any, b: any) => (safeTs(b.timestamp)||0) - (safeTs(a.timestamp)||0));
+            setDbOrders(list);
           }, (e) => { console.error('[Admin] Orders fallback gagal:', e.message); });
         } catch(e:any) { console.error('[Admin] Orders setup gagal:', e?.message); }
       });
@@ -278,12 +290,49 @@ export default memo(function AdminPanelPage({ showToast, isAdmin }) {
     return true;
   }).sort((a:any,b:any) => safeTs(b.timestamp)-safeTs(a.timestamp));
 
-  const filteredUsers = dbUsers.filter(u =>
-    u.name?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    u.email?.toLowerCase().includes(searchQuery.toLowerCase())
-  );
+  const filteredUsers = dbUsers
+    .filter(u => {
+      const matchSearch = u.name?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        u.email?.toLowerCase().includes(searchQuery.toLowerCase());
+      const matchStatus = userStatusFilter === 'all' ? true :
+        userStatusFilter === 'banned' ? u.banned : !u.banned;
+      return matchSearch && matchStatus;
+    })
+    .sort((a: any, b: any) => {
+      if (userSort === 'balance') return (b.balance || 0) - (a.balance || 0);
+      if (userSort === 'spent') return (userSpentMap[b.id] || 0) - (userSpentMap[a.id] || 0);
+      return (b.createdAt || 0) - (a.createdAt || 0);
+    });
   const displayedUsers   = filteredUsers.slice((userPage-1)*itemsPerPage, userPage*itemsPerPage);
   const displayedDeposits = pendingDeposits.slice((depositPage-1)*itemsPerPage, depositPage*itemsPerPage);
+
+  const filteredOrders = useMemo(() => {
+    const now = Date.now();
+    const dayMs = 86400000;
+    const sorted = [...dbOrders].sort((a:any,b:any) => (safeTs(b.timestamp)||0)-(safeTs(a.timestamp)||0));
+    return sorted.filter(o => {
+      // Status filter
+      if (orderFilter === 'success' && !(o.status==='success'||o.status==='finished')) return false;
+      if (orderFilter === 'canceled' && !(o.status==='canceled'||o.status==='CANCELLED')) return false;
+      if (orderFilter === 'active' && !(o.status==='active'||o.status==='pending')) return false;
+      // Date filter
+      const ts = safeTs(o.timestamp);
+      if (orderDateFilter === 'today' && ts < now - dayMs) return false;
+      if (orderDateFilter === 'week' && ts < now - 7*dayMs) return false;
+      if (orderDateFilter === 'month' && ts < now - 30*dayMs) return false;
+      // Search
+      if (orderSearch) {
+        const q = orderSearch.toLowerCase();
+        const match = (o.serviceId||'').toLowerCase().includes(q) ||
+          (o.saName||'').toLowerCase().includes(q) ||
+          (o.number||o.phone||'').includes(q) ||
+          (o.countryId||'').toLowerCase().includes(q);
+        if (!match) return false;
+      }
+      return true;
+    });
+  }, [dbOrders, orderFilter, orderDateFilter, orderSearch]);
+  const displayedOrders = filteredOrders.slice((orderPage-1)*itemsPerPage, orderPage*itemsPerPage);
 
   const totalBalance = dbUsers.reduce((s,u) => s+(u.balance||0), 0);
   const totalRevenue = useMemo(() =>
@@ -291,6 +340,17 @@ export default memo(function AdminPanelPage({ showToast, isAdmin }) {
   [dbOrders]);
   const activeOrdersCount = dbOrders.filter(o=>o.status==='active'||o.status==='pending').length;
   const bannedCount = dbUsers.filter(u=>u.banned).length;
+
+  // ✅ FIX: Hitung totalSpent per user HANYA dari order sukses/finished
+  const userSpentMap = useMemo(() => {
+    const map: Record<string, number> = {};
+    dbOrders.forEach((o: any) => {
+      if ((o.status === 'success' || o.status === 'finished') && o.userId) {
+        map[o.userId] = (map[o.userId] || 0) + (o.price || 0);
+      }
+    });
+    return map;
+  }, [dbOrders]);
 
   const globalLast7Days = useMemo(() => {
     const days = [];
@@ -308,6 +368,38 @@ export default memo(function AdminPanelPage({ showToast, isAdmin }) {
     });
     const maxAmount = Math.max(...days.map(d=>d.amount), 1000);
     return days.map(d=>({ ...d, percentage: (d.amount/maxAmount)*100 }));
+  }, [dbOrders]);
+
+  // ── Analytics: Cancel rate per hari (7 hari terakhir) ────────────────
+  const cancelRatePerDay = useMemo(() => {
+    const days = [];
+    const today = new Date(); today.setHours(0,0,0,0);
+    for (let i=6;i>=0;i--) {
+      const d = new Date(today); d.setDate(d.getDate()-i);
+      days.push({ dateStr: d.toLocaleDateString('id-ID',{weekday:'short'}), timestamp: d.getTime(), success:0, canceled:0, total:0 });
+    }
+    dbOrders.forEach(o => {
+      const oDate = new Date(safeTs(o.timestamp)); oDate.setHours(0,0,0,0);
+      const dayObj = days.find(d=>d.timestamp===oDate.getTime());
+      if (!dayObj) return;
+      dayObj.total++;
+      if (o.status==='success'||o.status==='finished') dayObj.success++;
+      if (o.status==='canceled'||o.status==='CANCELLED') dayObj.canceled++;
+    });
+    return days.map(d=>({ ...d, rate: d.total>0 ? Math.round((d.canceled/d.total)*100) : 0 }));
+  }, [dbOrders]);
+
+  // ── Analytics: Revenue per layanan ────────────────────────────────────
+  const revenueByService = useMemo(() => {
+    const map: Record<string, {name:string; revenue:number; count:number}> = {};
+    dbOrders.forEach(o => {
+      if (o.status!=='success'&&o.status!=='finished') return;
+      const key = o.serviceId || 'unknown';
+      if (!map[key]) map[key] = { name: (o.saName||o.serviceId||'?').toUpperCase(), revenue:0, count:0 };
+      map[key].revenue += (o.price||0);
+      map[key].count++;
+    });
+    return Object.values(map).sort((a,b)=>b.revenue-a.revenue).slice(0,8);
   }, [dbOrders]);
 
   // ── Actions ──────────────────────────────────────────────────────────
@@ -357,6 +449,7 @@ export default memo(function AdminPanelPage({ showToast, isAdmin }) {
   };
 
   // ✅ TELEGRAM ALERT: Kirim notifikasi manual ke admin via Telegram
+
   const handleSendTelegramAlert = async (msg: string) => {
     if (!isAdmin) return;
     setTgAlertLoading(true);
@@ -601,13 +694,14 @@ export default memo(function AdminPanelPage({ showToast, isAdmin }) {
       {/* TAB: OVERVIEW                                                  */}
       {/* ══════════════════════════════════════════════════════════════ */}
       {activeTab==='overview' && (
+        <div className="space-y-6">
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           {/* Chart */}
           <div className="bg-white/[0.03] border border-white/[0.06] rounded-2xl p-6">
             <div className="flex justify-between items-center mb-6">
               <div className="flex items-center gap-2">
                 <BarChart3 className="w-5 h-5 text-emerald-400"/>
-                <h3 className="font-black text-white uppercase tracking-wide text-sm">Pendapatan 30 Hari</h3>
+                <h3 className="font-black text-white uppercase tracking-wide text-sm">Pendapatan 7 Hari</h3>
               </div>
               <div className="text-right">
                 <p className="text-[10px] text-gray-500 font-bold uppercase">Total</p>
@@ -640,7 +734,7 @@ export default memo(function AdminPanelPage({ showToast, isAdmin }) {
               <h3 className="font-black text-white uppercase tracking-wide text-sm">Order Terbaru</h3>
             </div>
             <div className="space-y-2 max-h-[200px] overflow-y-auto scrollbar-custom">
-              {dbOrders.slice(0,8).map((o,i) => {
+              {[...dbOrders].sort((a:any,b:any) => (safeTs(b.timestamp)||0)-(safeTs(a.timestamp)||0)).slice(0,8).map((o,i) => {
                 const isOk = o.status==='success'||o.status==='finished';
                 const isCanceled = o.status==='canceled'||o.status==='CANCELLED';
                 const isActive = o.status==='active'||o.status==='pending';
@@ -671,12 +765,12 @@ export default memo(function AdminPanelPage({ showToast, isAdmin }) {
               <h3 className="font-black text-white uppercase tracking-wide text-sm">Top Member</h3>
             </div>
             <div className="space-y-2">
-              {[...dbUsers].sort((a:any,b:any)=>(b.totalSpent||0)-(a.totalSpent||0)).slice(0,5).map((u:any,i) => (
+              {[...dbUsers].sort((a:any,b:any)=>(userSpentMap[b.id]||0)-(userSpentMap[a.id]||0)).slice(0,5).map((u:any,i) => (
                 <div key={u.id} className="flex items-center gap-3 py-2 border-b border-white/5 last:border-0">
                   <span className={`w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-black ${i===0?'bg-yellow-500 text-black':i===1?'bg-gray-300 text-black':i===2?'bg-amber-600 text-black':'bg-white/10 text-white'}`}>{i+1}</span>
                   <img src={`https://api.dicebear.com/7.x/avataaars/svg?seed=${u.name}&backgroundColor=a855f7`} className="w-7 h-7 rounded-full border border-purple-500/20" alt="av"/>
                   <p className="text-xs font-bold text-white flex-1 truncate">{u.name}</p>
-                  <p className="text-xs font-black text-purple-400"><FormatRupiah value={u.totalSpent||0}/></p>
+                  <p className="text-xs font-black text-purple-400"><FormatRupiah value={userSpentMap[u.id]||0}/></p>
                 </div>
               ))}
               {dbUsers.length===0&&<p className="text-center text-gray-600 text-sm py-8">Belum ada data.</p>}
@@ -694,6 +788,7 @@ export default memo(function AdminPanelPage({ showToast, isAdmin }) {
                 { label:'Avg. saldo per member', value: <FormatRupiah value={dbUsers.length?Math.floor(totalBalance/dbUsers.length):0}/> },
                 { label:'Total order sukses', value: dbOrders.filter(o=>o.status==='success'||o.status==='finished').length },
                 { label:'Total order batal', value: dbOrders.filter(o=>o.status==='canceled'||o.status==='CANCELLED').length },
+                { label:'Cancel rate', value: (() => { const total = dbOrders.length; const batal = dbOrders.filter(o=>o.status==='canceled'||o.status==='CANCELLED').length; return total ? `${Math.round((batal/total)*100)}%` : '0%'; })() },
                 { label:'Deposit pending', value: pendingDeposits.length },
                 { label:'Member aktif (tdk banned)', value: dbUsers.filter((u:any)=>!u.banned).length },
               ].map((s,i) => (
@@ -703,6 +798,69 @@ export default memo(function AdminPanelPage({ showToast, isAdmin }) {
                 </div>
               ))}
             </div>
+          </div>
+        </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          {/* Cancel rate per hari */}
+          <div className="bg-white/[0.03] border border-white/[0.06] rounded-2xl p-6">
+            <div className="flex items-center gap-2 mb-4">
+              <TrendingUp className="w-5 h-5 text-red-400"/>
+              <h3 className="font-black text-white uppercase tracking-wide text-sm">Cancel Rate 7 Hari</h3>
+            </div>
+            <div className="flex items-end gap-2 h-32">
+              {cancelRatePerDay.map((day,i) => (
+                <div key={i} className="flex-1 flex flex-col items-center gap-1 group relative h-full">
+                  <div className="w-full flex-1 flex items-end rounded-t-lg overflow-hidden bg-black/30 border border-white/5">
+                    <div className="w-full rounded-t-lg transition-all duration-500 relative cursor-pointer"
+                      style={{ height:`${Math.max(day.rate,4)}%`, background: day.rate>50?'linear-gradient(to top,#dc2626,#f87171)':day.rate>20?'linear-gradient(to top,#d97706,#fbbf24)':'linear-gradient(to top,#059669,#34d399)' }}>
+                      <div className="opacity-0 group-hover:opacity-100 absolute -top-8 left-1/2 -translate-x-1/2 bg-white text-black text-[10px] font-black py-1 px-2 rounded-lg pointer-events-none whitespace-nowrap z-10 shadow-lg">
+                        {day.rate}% ({day.canceled}/{day.total})
+                      </div>
+                    </div>
+                  </div>
+                  <span className={`text-[9px] font-bold uppercase ${i===6?'text-red-400':'text-gray-600'}`}>{i===6?'HARI INI':day.dateStr}</span>
+                </div>
+              ))}
+            </div>
+            <div className="flex items-center gap-4 mt-3 text-[10px] font-bold">
+              <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-emerald-400 inline-block"/>{'<'}20% aman</span>
+              <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-yellow-400 inline-block"/>20–50% waspada</span>
+              <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-red-500 inline-block"/>{'>'}50% tinggi</span>
+            </div>
+          </div>
+
+          {/* Revenue per layanan */}
+          <div className="bg-white/[0.03] border border-white/[0.06] rounded-2xl p-6">
+            <div className="flex items-center gap-2 mb-4">
+              <BarChart3 className="w-5 h-5 text-emerald-400"/>
+              <h3 className="font-black text-white uppercase tracking-wide text-sm">Revenue per Layanan</h3>
+            </div>
+            {revenueByService.length === 0 ? (
+              <p className="text-gray-600 text-sm text-center py-8">Belum ada data order sukses.</p>
+            ) : (
+              <div className="space-y-2">
+                {revenueByService.map((svc,i) => {
+                  const maxRev = revenueByService[0]?.revenue || 1;
+                  const pct = Math.round((svc.revenue/maxRev)*100);
+                  return (
+                    <div key={i} className="space-y-1">
+                      <div className="flex items-center justify-between text-xs">
+                        <span className="text-white font-bold truncate max-w-[140px]">{svc.name}</span>
+                        <div className="flex items-center gap-2 shrink-0">
+                          <span className="text-gray-500">{svc.count}x</span>
+                          <span className="text-emerald-400 font-black"><FormatRupiah value={svc.revenue}/></span>
+                        </div>
+                      </div>
+                      <div className="w-full h-1.5 bg-white/5 rounded-full overflow-hidden">
+                        <div className="h-full bg-gradient-to-r from-emerald-600 to-emerald-400 rounded-full transition-all duration-700" style={{width:`${pct}%`}}/>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
           </div>
         </div>
       )}
@@ -815,7 +973,21 @@ export default memo(function AdminPanelPage({ showToast, isAdmin }) {
                 placeholder="Cari nama atau email…"
                 className="w-full bg-white/[0.04] border border-white/[0.08] rounded-xl py-2.5 pl-9 pr-4 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-purple-500 transition-all"/>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
+              {/* Filter status */}
+              {(['all','active','banned'] as const).map(f => (
+                <button key={f} onClick={()=>{setUserStatusFilter(f);setUserPage(1);}}
+                  className={`px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all ${userStatusFilter===f?'bg-purple-600 text-white':'bg-white/5 text-gray-500 hover:text-white'}`}>
+                  {f==='all'?'Semua':f==='active'?'Aktif':'Banned'}
+                </button>
+              ))}
+              {/* Sort */}
+              <select value={userSort} onChange={e=>{setUserSort(e.target.value as any);setUserPage(1);}}
+                className="bg-white/[0.04] border border-white/[0.08] rounded-lg px-2 py-1.5 text-[10px] font-black text-gray-400 focus:outline-none focus:border-purple-500 uppercase tracking-widest">
+                <option value="joined">Terbaru</option>
+                <option value="balance">Saldo ↓</option>
+                <option value="spent">Belanja ↓</option>
+              </select>
               <span className="text-xs text-gray-500 font-bold">{filteredUsers.length} pengguna</span>
               <button onClick={handleExportUsersCSV}
                 className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-purple-500/10 border border-purple-500/20 text-purple-400 hover:bg-purple-600 hover:text-white text-xs font-black transition-all">
@@ -879,6 +1051,10 @@ export default memo(function AdminPanelPage({ showToast, isAdmin }) {
                             className="flex items-center gap-1 px-3 py-2 rounded-xl bg-purple-500/10 border border-purple-500/20 text-purple-400 hover:bg-purple-600 hover:text-white text-[10px] font-black transition-all disabled:opacity-40">
                             <Plus className="w-3 h-3"/> SUNTIK
                           </button>
+                          <button onClick={()=>setSelectedUserHistory(u)}
+                            className="p-2 rounded-xl bg-blue-500/10 border border-blue-500/20 text-blue-400 hover:bg-blue-500 hover:text-white transition-all" title="History Order">
+                            <History className="w-3.5 h-3.5"/>
+                          </button>
                         </div>
                       </td>
                     </tr>
@@ -898,10 +1074,43 @@ export default memo(function AdminPanelPage({ showToast, isAdmin }) {
       {/* ══════════════════════════════════════════════════════════════ */}
       {activeTab==='orders' && (
         <div className="bg-white/[0.03] border border-white/[0.06] rounded-2xl overflow-hidden">
-          <div className="px-6 py-4 border-b border-white/[0.06] flex items-center gap-3">
+          <div className="px-6 py-4 border-b border-white/[0.06] flex flex-wrap items-center gap-3">
             <History className="w-5 h-5 text-blue-400"/>
             <h3 className="font-black text-white text-sm uppercase tracking-wide">Pesanan 30 Hari Terakhir</h3>
-            <span className="text-[10px] bg-white/5 border border-white/10 px-2 py-0.5 rounded-full text-gray-400 font-bold">{dbOrders.length} order</span>
+            <span className="text-[10px] bg-white/5 border border-white/10 px-2 py-0.5 rounded-full text-gray-400 font-bold">{filteredOrders.length} order</span>
+            <div className="flex items-center gap-1.5 ml-auto flex-wrap">
+              {/* Search */}
+              <div className="relative">
+                <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-500"/>
+                <input value={orderSearch} onChange={e=>{setOrderSearch(e.target.value);setOrderPage(1);}}
+                  placeholder="Cari layanan / nomor…"
+                  className="bg-white/[0.04] border border-white/[0.08] rounded-lg py-1.5 pl-7 pr-3 text-xs text-white placeholder-gray-600 focus:outline-none focus:border-blue-500 w-40"/>
+              </div>
+              {/* Date filter */}
+              {([
+                {id:'all',label:'Semua'},
+                {id:'today',label:'Hari ini'},
+                {id:'week',label:'7 Hari'},
+                {id:'month',label:'30 Hari'},
+              ] as const).map(f => (
+                <button key={f.id} onClick={()=>{setOrderDateFilter(f.id);setOrderPage(1);}}
+                  className={`px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all ${orderDateFilter===f.id?'bg-purple-600 text-white':'bg-white/5 text-gray-500 hover:text-white'}`}>
+                  {f.label}
+                </button>
+              ))}
+              {/* Status filter */}
+              {([
+                {id:'all', label:'Semua', color:'bg-blue-600'},
+                {id:'success', label:'Sukses', color:'bg-emerald-600'},
+                {id:'canceled', label:'Batal', color:'bg-red-600'},
+                {id:'active', label:'Aktif', color:'bg-yellow-600'},
+              ] as const).map(f => (
+                <button key={f.id} onClick={()=>{setOrderFilter(f.id);setOrderPage(1);}}
+                  className={`px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all ${orderFilter===f.id?`${f.color} text-white`:'bg-white/5 text-gray-500 hover:text-white'}`}>
+                  {f.label}
+                </button>
+              ))}
+            </div>
           </div>
           <div className="overflow-x-auto">
             <table className="w-full">
@@ -913,12 +1122,12 @@ export default memo(function AdminPanelPage({ showToast, isAdmin }) {
                 </tr>
               </thead>
               <tbody>
-                {dbOrders.slice(0,50).map((o:any,i) => {
+                {displayedOrders.map((o:any,i) => {
                   const isOk=o.status==='success'||o.status==='finished';
                   const isCanceled=o.status==='canceled'||o.status==='CANCELLED';
                   const isActive=o.status==='active'||o.status==='pending';
                   return (
-                    <tr key={i} className="border-b border-white/[0.04] hover:bg-white/[0.02] transition-colors">
+                    <tr key={i} onClick={()=>setSelectedOrder(o)} className="border-b border-white/[0.04] hover:bg-white/[0.02] transition-colors cursor-pointer">
                       <td className="py-3 px-5">
                         <p className="text-xs font-bold text-white">{o.saName||o.serviceId?.toUpperCase()}</p>
                         <p className="text-[10px] text-gray-500">{o.countryId?.toUpperCase()}</p>
@@ -945,12 +1154,15 @@ export default memo(function AdminPanelPage({ showToast, isAdmin }) {
                     </tr>
                   );
                 })}
-                {dbOrders.length===0&&(
-                  <tr><td colSpan={6} className="py-16 text-center text-gray-500 text-sm">Belum ada order dalam 30 hari terakhir.</td></tr>
+                {filteredOrders.length===0&&(
+                  <tr><td colSpan={6} className="py-16 text-center text-gray-500 text-sm">
+                    {orderFilter==='all'?'Belum ada order dalam 30 hari terakhir.':'Tidak ada order dengan status ini.'}
+                  </td></tr>
                 )}
               </tbody>
             </table>
           </div>
+          <PaginationControls currentPage={orderPage} totalPages={Math.ceil(filteredOrders.length/itemsPerPage)} onPageChange={setOrderPage}/>
         </div>
       )}
 
@@ -1126,6 +1338,89 @@ export default memo(function AdminPanelPage({ showToast, isAdmin }) {
             </div>
           </div>
         </div>
+      )}
+
+      {/* ── ORDER DETAIL MODAL ───────────────────────────────────────── */}
+      {selectedOrder && (
+        <div className="fixed inset-0 z-[110] flex items-center justify-center px-4 bg-black/90 backdrop-blur-sm animate-in fade-in duration-200" onClick={()=>setSelectedOrder(null)}>
+          <div className="bg-[#0a0202] border border-blue-500/30 p-6 rounded-2xl w-full max-w-md shadow-[0_0_50px_rgba(59,130,246,0.1)] relative overflow-hidden" onClick={e=>e.stopPropagation()}>
+            <div className="absolute -top-16 -right-16 w-40 h-40 bg-blue-600/10 blur-3xl rounded-full"/>
+            <div className="flex justify-between items-center mb-5 relative z-10">
+              <h3 className="text-lg font-black text-white uppercase">Detail Order</h3>
+              <button onClick={()=>setSelectedOrder(null)} className="text-gray-500 hover:text-white"><X className="w-5 h-5"/></button>
+            </div>
+            <div className="space-y-3 relative z-10">
+              {[
+                {label:'Order ID', value: selectedOrder.id},
+                {label:'Layanan', value: (selectedOrder.saName||selectedOrder.serviceId||'—').toUpperCase()},
+                {label:'Negara', value: selectedOrder.countryId?.toUpperCase()||'—'},
+                {label:'Nomor', value: selectedOrder.number||selectedOrder.phone||'—'},
+                {label:'OTP', value: selectedOrder.sms?.[0]?.text || selectedOrder.otp || '—'},
+                {label:'Harga', value: formatRupiah(selectedOrder.price||0)},
+                {label:'Server', value: selectedOrder.provider==='smsactivate'?'Server 2':'Server 1'},
+                {label:'Status', value: selectedOrder.status?.toUpperCase()||'—'},
+                {label:'Waktu', value: fmtTs(selectedOrder.timestamp)},
+              ].map((r,i) => (
+                <div key={i} className="flex items-start justify-between py-2 border-b border-white/5 last:border-0 gap-4">
+                  <span className="text-[10px] text-gray-500 font-black uppercase tracking-widest shrink-0">{r.label}</span>
+                  <span className="text-xs text-white font-bold text-right break-all">{r.value}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── USER HISTORY MODAL ───────────────────────────────────────── */}
+      {selectedUserHistory && (
+        <div className="fixed inset-0 z-[110] flex items-center justify-center px-4 bg-black/90 backdrop-blur-sm animate-in fade-in duration-200" onClick={()=>setSelectedUserHistory(null)}>
+          <div className="bg-[#0a0202] border border-purple-500/30 p-6 rounded-2xl w-full max-w-lg shadow-[0_0_50px_rgba(168,85,247,0.1)] relative overflow-hidden max-h-[80vh] flex flex-col" onClick={e=>e.stopPropagation()}>
+            <div className="absolute -top-16 -right-16 w-40 h-40 bg-purple-600/10 blur-3xl rounded-full"/>
+            <div className="flex justify-between items-center mb-4 relative z-10 shrink-0">
+              <div>
+                <h3 className="text-lg font-black text-white uppercase">History Order</h3>
+                <p className="text-xs text-gray-500">{selectedUserHistory.name}</p>
+              </div>
+              <button onClick={()=>setSelectedUserHistory(null)} className="text-gray-500 hover:text-white"><X className="w-5 h-5"/></button>
+            </div>
+            <div className="overflow-y-auto flex-1 space-y-2 relative z-10 pr-1">
+              {(() => {
+                const userOrders = [...dbOrders]
+                  .filter(o => o.userId === selectedUserHistory.id)
+                  .sort((a:any,b:any) => (safeTs(b.timestamp)||0)-(safeTs(a.timestamp)||0));
+                if (userOrders.length === 0) return (
+                  <div className="text-center py-12 text-gray-600">
+                    <History className="w-8 h-8 mx-auto mb-2 opacity-40"/>
+                    <p className="text-sm">Belum ada order</p>
+                  </div>
+                );
+                return userOrders.map((o:any,i) => {
+                  const isOk=o.status==='success'||o.status==='finished';
+                  const isCanceled=o.status==='canceled'||o.status==='CANCELLED';
+                  return (
+                    <div key={i} className="bg-white/[0.03] border border-white/[0.06] rounded-xl p-3 flex items-center justify-between gap-3">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <div className={`w-2 h-2 rounded-full shrink-0 ${isOk?'bg-emerald-400':isCanceled?'bg-red-400':'bg-blue-400'}`}/>
+                        <div className="min-w-0">
+                          <p className="text-xs text-white font-bold truncate">{(o.saName||o.serviceId||'?').toUpperCase()}</p>
+                          <p className="text-[10px] text-gray-500">{fmtTs(o.timestamp)}</p>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <span className="text-xs font-black text-white"><FormatRupiah value={o.price||0}/></span>
+                        <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full ${isOk?'bg-emerald-500/15 text-emerald-400':isCanceled?'bg-red-500/15 text-red-400':'bg-blue-500/15 text-blue-400'}`}>
+                          {isOk?'SUKSES':isCanceled?'BATAL':'AKTIF'}
+                        </span>
+                      </div>
+                    </div>
+                  );
+                });
+              })()}
+            </div>
+          </div>
+        </div>
+      )}
+
       )}
     </div>
   );

@@ -1,249 +1,32 @@
 'use client';
 
-import React, { useState, useEffect, useMemo, useRef, useCallback, memo } from 'react';
-import { createPortal } from 'react-dom';
-// @ts-ignore
-import { FixedSizeList } from 'react-window';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
-  Search, Filter, ShoppingCart, RefreshCw, Loader2,
-  ChevronLeft, ChevronRight, ChevronDown,
-  AlertCircle, AlertTriangle, Check, X,
-  Key, Clock, Copy, Zap, Smartphone, Globe, Lock, Shield, Flame,
-  Star, ArrowRight, CheckCircle2, XCircle, CreditCard, History,
-  Gift, User, MessageCircle, Plus, Eye, EyeOff
+  ChevronDown, ArrowRight, Loader2, Star, X, Check, Copy
 } from 'lucide-react';
-import { initializeApp, getApps, getApp } from 'firebase/app';
-import { getAuth } from 'firebase/auth';
-import { getFirestore } from 'firebase/firestore';
-import { secureApiCall } from '@/lib/apiClient';
-import { Button } from './ui';
 
-// ── Firebase singleton ────────────────────────────────────────────────────
-const firebaseConfig = {
-  apiKey:            process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
-  authDomain:        process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN,
-  projectId:         process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID,
-  storageBucket:     process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET,
-  messagingSenderId: process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID,
-  appId:             process.env.NEXT_PUBLIC_FIREBASE_APP_ID,
-  measurementId:     process.env.NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID,
-};
+type LegalModalTab = 'terms-id' | 'terms-en' | 'privacy-id' | 'privacy-en';
 
-let auth: any = null;
-let db: any   = null;
-if (typeof window !== 'undefined') {
-  try {
-    const _app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
-    auth = getAuth(_app);
-    db   = getFirestore(_app);
-  } catch {}
-}
-
-// ── Helpers ───────────────────────────────────────────────────────────────
-const formatRupiah = (value: number): string => {
-  const safeValue = isNaN(value) ? 0 : value;
-  return new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', minimumFractionDigits: 0 }).format(safeValue);
-};
-const FormatRupiah = ({ value }: { value: number }) => <>{formatRupiah(value)}</>;
-
-const copyToClipboardHelper = (text: string, showToastFn?: (msg: string, type: string) => void) => {
-  const fallback = (t: string) => {
-    const ta = document.createElement('textarea');
-    ta.value = t; ta.style.cssText = 'position:fixed;top:0;left:0';
-    document.body.appendChild(ta); ta.focus(); ta.select();
-    try { document.execCommand('copy'); } catch {}
-    document.body.removeChild(ta);
-  };
-  if (!navigator.clipboard || !window.isSecureContext) {
-    fallback(text);
-    if (showToastFn) showToastFn('Berhasil disalin!', 'success');
-  } else {
-    navigator.clipboard.writeText(text)
-      .then(() => { if (showToastFn) showToastFn('Berhasil disalin!', 'success'); })
-      .catch(() => { fallback(text); if (showToastFn) showToastFn('Berhasil disalin!', 'success'); });
-  }
-};
-
-// ── Components + Data (extracted from page.tsx) ───────────────────────────
-const _CARD_H = 220;
-const _GAP    = 12;
-
-function _cols(w) {
-  if (w >= 1536) return 5;
-  if (w >= 1024) return 4;
-  if (w >= 640)  return 3;
-  return 2;
-}
-
-const _CatalogRow = memo(function _CatalogRow({ index, style, data }) {
-  const { rows, liveStocks, onBuyClick, getServiceMetaFn, getCountriesFn, getRealPriceFn } = data;
-  const row = rows[index];
-  if (!row) return null;
+// Stub LegalModal — ganti dengan import dari AuthPage jika sudah di-export
+function LegalModal({ initialTab, onClose }: { initialTab: LegalModalTab; onClose: () => void }) {
   return (
-    <div style={{ ...style, display: 'flex', gap: _GAP, paddingBottom: _GAP, boxSizing: 'border-box' }}>
-      {row.map(item => {
-        const liveData      = liveStocks[item.serviceId];
-        const stockCount    = liveData?.count != null ? Number(liveData.count) : null;
-        const hasTier       = liveData?.prices && Object.keys(liveData.prices).length > 0;
-        const isOutOfStock  = !liveData || stockCount === 0 || (stockCount === null && !hasTier);
-        const startingPrice = liveData?.minPrice > 0
-          ? liveData.minPrice
-          : getRealPriceFn(item.countryId, item.serviceId, 'cheap');
-        // ✅ FIX NAMA: Selalu gunakan saName dari provider sebagai nama tampilan karena
-        // itulah nama ASLI yang dikembalikan API (InDriver, MoMo, dll).
-        // Icon/styling tetap diambil dari baseMeta (SERVICES array kita) jika ada.
-        // saName dikosongkan di-override hanya jika kita punya nama yang lebih baik
-        // di SERVICES dan saName-nya adalah nama generik/tidak dikenal.
-        // ✅ FIX ICON: getSAServiceMeta memprioritaskan saName dari API untuk
-        // menentukan icon yang benar, bukan serviceId internal yang mungkin salah
-        // hasil pemetaan SA (mis: hb→hbo padahal aslinya Hepsiburada).
-        const serviceMeta = liveData?.saName
-          ? getSAServiceMeta(item.serviceId, liveData.saName)
-          : liveData?.saCode
-            ? { ...getServiceMetaFn(item.serviceId), name: liveData.saCode.toUpperCase() }
-            : getServiceMetaFn(item.serviceId);
-        return (
-          <div key={item.id} style={{ flex: 1, minWidth: 0 }}>
-            <ServiceCard
-              item={item}
-              service={serviceMeta}
-              stockCount={stockCount}
-              isOutOfStock={isOutOfStock}
-              startingPrice={startingPrice}
-              countryMeta={getCountriesFn().find(c => String(c.id) === String(item.countryId) || c.id === item.countryId)}
-              onBuyClick={onBuyClick}
-            />
-          </div>
-        );
-      })}
-      {Array.from({ length: data.columnCount - row.length }).map((_, i) => (
-        <div key={`pad-${i}`} style={{ flex: 1 }} />
-      ))}
-    </div>
-  );
-});
-
-function _AutoSizedList({ rows, width, itemData }) {
-  const wrapRef = useRef(null);
-  const [h, setH] = useState(600);
-  useEffect(() => {
-    const el = wrapRef.current;
-    if (!el) return;
-    setH(el.clientHeight || 600);
-    const ro = new ResizeObserver(e => setH(e[0]?.contentRect.height || 600));
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, []);
-  return (
-    <div ref={wrapRef} style={{ flex: 1, minHeight: 0, height: '100%' }}>
-      <FixedSizeList height={h} itemCount={rows.length} itemSize={_CARD_H} width={width} itemData={itemData} overscanCount={3}>
-        {_CatalogRow}
-      </FixedSizeList>
-    </div>
-  );
-}
-
-const VirtualCatalogGrid = memo(function VirtualCatalogGrid({ items, liveStocks, onBuyClick, getServiceMetaFn, getCountriesFn, getRealPriceFn }) {
-  const containerRef = useRef(null);
-  const [cw, setCw] = useState(640);
-  useEffect(() => {
-    const el = containerRef.current;
-    if (!el) return;
-    setCw(el.clientWidth);
-    const ro = new ResizeObserver(e => setCw(e[0]?.contentRect.width ?? 640));
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, []);
-  const columnCount = _cols(cw);
-  const rows = useMemo(() => {
-    const r = [];
-    for (let i = 0; i < items.length; i += columnCount) r.push(items.slice(i, i + columnCount));
-    return r;
-  }, [items, columnCount]);
-  const itemData = { rows, liveStocks, columnCount, onBuyClick, getServiceMetaFn, getCountriesFn, getRealPriceFn };
-  if (!items.length) return null;
-  return (
-    <div ref={containerRef} style={{ width: '100%', flex: 1 }}>
-      <_AutoSizedList rows={rows} width={cw} itemData={itemData} />
-    </div>
-  );
-});
-// ---
-const Shimmer: React.FC<{ className?: string; style?: React.CSSProperties }> = ({ className = '', style }) => (
-  <div
-    style={style}
-    className={`relative overflow-hidden bg-white/[0.06] rounded-lg before:absolute before:inset-0 before:-translate-x-full before:animate-[shimmer_1.5s_infinite] before:bg-gradient-to-r before:from-transparent before:via-white/[0.08] before:to-transparent ${className}`}
-  />
-);
-
-const ShimmerStyle: React.FC = () => (
-  <style suppressHydrationWarning>{`@keyframes shimmer { 100% { transform: translateX(100%); } }`}</style>
-);
-
-const CatalogSkeleton: React.FC<{ count?: number }> = ({ count = 12 }) => (
-  <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-4 2xl:grid-cols-5 gap-3 md:gap-4">
-    <ShimmerStyle />
-    {Array.from({ length: count }).map((_, i) => (
-      <div key={i} className="relative overflow-hidden rounded-2xl p-4 md:p-5 flex flex-col bg-white/[0.04] border border-white/[0.06]">
-        <div className="flex justify-between items-start mb-3">
-          <Shimmer className="w-11 h-11 rounded-xl" />
-          <Shimmer className="w-6 h-6 rounded-md" />
+    <div className="fixed inset-0 z-[200] bg-black/80 backdrop-blur-sm flex items-center justify-center px-4" onClick={onClose}>
+      <div className="bg-[#080000] border border-red-500/20 rounded-2xl p-8 max-w-lg w-full max-h-[80vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+        <div className="flex justify-between items-center mb-6">
+          <h3 className="text-white font-black text-xl uppercase">Syarat & Ketentuan</h3>
+          <button onClick={onClose} className="text-gray-500 hover:text-white"><X className="w-5 h-5"/></button>
         </div>
-        <Shimmer className="h-4 w-3/4 mb-2 rounded-md" />
-        <Shimmer className="h-3 w-1/2 mb-5 rounded-md" />
-        <div className="border-t border-white/5 pt-3 mt-auto flex flex-col gap-2">
-          <Shimmer className="h-3 w-1/3 rounded-md" />
-          <Shimmer className="h-5 w-1/2 rounded-md" />
-          <Shimmer className="h-9 w-full rounded-xl mt-1" />
+        <div className="text-gray-400 text-sm leading-relaxed space-y-4">
+          <p>Platform PusatNokos hanya menyediakan nomor virtual untuk keperluan verifikasi OTP yang sah.</p>
+          <p>Penyalahgunaan layanan untuk tindakan ilegal sepenuhnya menjadi tanggung jawab pengguna.</p>
+          <p>Refund otomatis diberikan jika OTP tidak masuk dalam waktu yang ditentukan.</p>
+          <p>Kami tidak menyimpan atau menjual data pribadi pengguna kepada pihak ketiga.</p>
         </div>
       </div>
-    ))}
-  </div>
-);
-// ---
-function ProviderLogo({ src, fallbackEmoji, alt }: { src: string; fallbackEmoji: string; alt: string }) {
-  const [failed, setFailed] = useState(false);
-  if (failed) return <span className="text-sm leading-none">{fallbackEmoji}</span>;
-  return (
-    <img
-      src={src}
-      alt={alt}
-      width={18}
-      height={18}
-      className="w-[18px] h-[18px] object-contain rounded-sm shrink-0"
-      onError={() => setFailed(true)}
-      referrerPolicy="no-referrer"
-    />
-  );
-}
-
-function ProviderToggle({ provider, onChange }: { provider: '5sim' | 'smsactivate'; onChange: (p: '5sim' | 'smsactivate') => void }) {
-  return (
-    <div className="flex items-center gap-1.5 bg-white/[0.04] border border-white/[0.08] rounded-2xl p-1.5 w-fit">
-      <button
-        onClick={() => onChange('5sim')}
-        className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-black uppercase tracking-widest transition-all ${
-          provider === '5sim'
-            ? 'bg-red-600 text-white shadow-lg shadow-red-900/40'
-            : 'text-gray-500 hover:text-white hover:bg-white/5'
-        }`}
-      >
-        SERVER 1
-      </button>
-      <button
-        onClick={() => onChange('smsactivate')}
-        className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-black uppercase tracking-widest transition-all ${
-          provider === 'smsactivate'
-            ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/40'
-            : 'text-gray-500 hover:text-white hover:bg-white/5'
-        }`}
-      >
-        SERVER 2
-      </button>
     </div>
   );
 }
-// ---
+
 const COUNTRIES_STATIC = [
   // Asia Tenggara
   { id: 'indonesia', name: 'Indonesia', code: '+62', flag: '🇮🇩' },
@@ -458,7 +241,6 @@ const getCountryDisplay = (countryId: string, dynamicCountries?: Array<{id: any;
 
 // COUNTRIES tetap untuk backward compat di luar BuyNumberPage
 const COUNTRIES = COUNTRIES_STATIC;
-
 const mapCountryTo5Sim = (countryId) => {
   const map = {
     'indonesia': 'indonesia', 'russia': 'russia', 'usa': 'usa', 'england': 'england',
@@ -1409,42 +1191,43 @@ const getRealPrice = (countryId, serviceId, tier = 'reguler') => {
   return calcPriceFromUsd(finalUsd);
 };
 
-// ==========================================
-// 2. FUNGSI API CALL TERLINDUNGI
-// ==========================================
-// secureApiCall dan clearTokenCache diimpor dari @/lib/apiClient
-// Fitur baru: Token Cache otomatis + Rate Limiting per endpoint
+const THEME = {
+  bg: 'bg-[#050000]', 
+  panel: 'bg-[#0a0202]/95', 
+  panelSolid: 'bg-[#0a0202]',
+  border: 'border-red-500/20',
+  text: 'text-gray-300',
+  textMuted: 'text-red-100/40',
+  heading: 'text-white',
+  accentPrimary: 'text-red-500',
+  accentSecondary: 'text-white',
+  gradientPrimary: 'bg-gradient-to-r from-red-600 via-red-700 to-rose-900',
+  gradientText: 'bg-clip-text text-transparent bg-gradient-to-r from-red-400 via-orange-200 to-red-300',
+  glass: 'bg-white/[0.04] backdrop-blur-xl border border-white/[0.07] shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]',
+};
 
-// ==========================================
-// 3. KONFIGURASI UMUM & HELPER
-// ==========================================
-// ✅ FIX #3: ADMIN_EMAILS dihapus — tidak aman disimpan di NEXT_PUBLIC_ (terekspos di JS bundle).
-// isAdmin sekarang ditentukan dari field `role: 'admin'` di dokumen Firestore user.
-// Server API route tetap wajib verifikasi token secara independen.
-//
-// ⚠️  WAJIB DIPASANG — Firestore Security Rules:
-// Tanpa rule ini, user bisa menulis role:'admin' ke dokumen mereka sendiri!
-//
-//   match /users/{userId} {
-//     allow read: if request.auth != null && request.auth.uid == userId;
-//     allow create: if request.auth != null && request.auth.uid == userId;
-//     allow update: if request.auth != null && request.auth.uid == userId
-//       && !request.resource.data.diff(resource.data)
-//           .affectedKeys().hasAny(['role', 'balance', 'banned', 'pinHash']);
-//   }
-//
-// Field sensitif (role, balance, banned, pinHash) hanya boleh diubah via
-// server-side Admin SDK di dalam API route yang sudah verifikasi token.
+const AppLogo = ({ className = "w-10 h-10", size, iconSize }: { className?: string; size?: string; iconSize?: string }) => {
+  const resolvedClass = size || className;
+  return (
+    <svg viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg" className={`${resolvedClass} rounded-xl shadow-[0_0_15px_rgba(220,38,38,0.5)]`}>
+      <rect width="100" height="100" fill="#ba1111" />
+      <path d="M 45 25 L 65 35 L 65 55 L 45 45 Z" fill="white" />
+      <path d="M 35 45 L 45 50 L 45 75 L 35 65 Z" fill="white" />
+    </svg>
+  );
+};
 
-// ---
+// --- REUSABLE COMPONENTS ---
 
-// ---
+// ✅ PERF: React.memo — tidak re-render kecuali service/className berubah
+// ✅ LOGO: fallback chain via useRef supaya tidak trigger render loop
+// ✅ FIX: Clearbit diprioritaskan sebagai sumber utama (PNG, lebih stabil dari SVG iconify)
+//         urutan: clearbit → iconify (image field) → google favicon → emoji
 const ServiceIcon = React.memo(function ServiceIcon({ service, className = "w-12 h-12 text-xl" }: { service: any; className?: string }) {
-  // ✅ FIX PERF: Pakai Google Favicon sebagai primary — jauh lebih reliable dari clearbit
-  // yang sering ERR_NAME_NOT_RESOLVED. Urutan: Google Favicon → Clearbit → Iconify → Emoji
+  // Tentukan sumber pertama: kalau ada domain di map, langsung pakai clearbit (lebih reliable)
   const getInitialSrc = (svc: any): string | null => {
     const domain = SERVICE_DOMAIN_MAP[svc?.id];
-    if (domain) return `https://www.google.com/s2/favicons?domain=${domain}&sz=128`;
+    if (domain) return `https://logo.clearbit.com/${domain}`;
     return svc?.image || null; // fallback ke iconify SVG jika tidak ada di domain map
   };
 
@@ -1458,16 +1241,16 @@ const ServiceIcon = React.memo(function ServiceIcon({ service, className = "w-12
 
   const handleImgError = useCallback(() => {
     const domain = SERVICE_DOMAIN_MAP[service?.id];
-    if (fallbackStage.current === 0 && domain) {
-      // Stage 1: Clearbit sebagai fallback dari Google Favicon
+    if (fallbackStage.current === 0 && service?.image) {
+      // Stage 1: Coba iconify/image URL asli (sudah skip clearbit karena itu stage-0)
       fallbackStage.current = 1;
-      setImgSrc(`https://logo.clearbit.com/${domain}`);
+      setImgSrc(service.image);
       return;
     }
-    if (fallbackStage.current <= 1 && service?.image) {
-      // Stage 2: Iconify SVG (jika ada)
+    if (fallbackStage.current <= 1 && domain) {
+      // Stage 2: Google Favicon (selalu ada untuk domain valid)
       fallbackStage.current = 2;
-      setImgSrc(service.image);
+      setImgSrc(`https://www.google.com/s2/favicons?domain=${domain}&sz=128`);
       return;
     }
     // Stage 3: Tampilkan emoji icon
@@ -1493,971 +1276,527 @@ const ServiceIcon = React.memo(function ServiceIcon({ service, className = "w-12
     </div>
   );
 });
-const ServiceCard = React.memo(function ServiceCard({ item, service, stockCount, isOutOfStock, startingPrice, countryMeta, onBuyClick }: {
-  item: any; service: any; stockCount: number | null; isOutOfStock: boolean;
-  startingPrice: number; countryMeta: any; onBuyClick: (item: any) => void;
-}) {
+
+const Button = ({ children, variant = 'primary', className = '', onClick, disabled, type = 'button' }) => {
+  const baseStyle = "inline-flex items-center justify-center rounded-2xl font-bold transition-all duration-200 ease-out disabled:opacity-40 disabled:cursor-not-allowed active:scale-[0.96] select-none text-sm";
+  const variants = {
+    primary: `${THEME.gradientPrimary} text-white shadow-[0_2px_20px_rgba(220,38,38,0.3),inset_0_1px_0_rgba(255,255,255,0.12)] hover:shadow-[0_4px_30px_rgba(220,38,38,0.55)] hover:brightness-110 px-5 py-2.5 border border-red-400/20`,
+    secondary: `bg-white/95 text-red-900 font-black hover:bg-white shadow-[0_2px_15px_rgba(255,255,255,0.08)] px-5 py-2.5`,
+    outline: `border border-red-500/30 text-red-400 hover:bg-red-500/10 hover:border-red-500/50 hover:text-red-300 px-5 py-2.5 backdrop-blur-sm`,
+    telegram: `border border-blue-500/40 text-blue-400 hover:bg-blue-600 hover:border-blue-600 hover:text-white px-5 py-2.5 backdrop-blur-sm`,
+    ghost: "text-gray-400 hover:text-white hover:bg-white/[0.06] px-4 py-2 rounded-xl",
+    danger: "bg-red-500/10 text-red-400 border border-red-500/20 hover:bg-red-500/20 hover:border-red-500/40 px-4 py-2 rounded-xl",
+    whatsapp: "bg-gradient-to-r from-[#25D366] to-[#1ab557] text-white shadow-[0_2px_20px_rgba(37,211,102,0.25)] hover:brightness-110 px-5 py-2.5 border border-[#25D366]/20"
+  };
   return (
-    <div
-      onClick={() => !isOutOfStock && onBuyClick(item)}
-      style={{ contain: 'layout style paint' }} // ✅ CSS containment → GPU-accelerated scroll
-      className={`
-        relative overflow-hidden rounded-2xl transition-all duration-200 group flex flex-col border select-none
-        ${isOutOfStock
-          ? 'bg-white/[0.02] border-white/[0.04] opacity-50 cursor-not-allowed grayscale'
-          : 'bg-[#0d0202] border-red-900/20 hover:border-red-500/40 hover:shadow-[0_12px_40px_rgba(220,38,38,0.15)] cursor-pointer active:scale-[0.98]'
-        }
-      `}
-    >
-      {/* Glow hover */}
-      {!isOutOfStock && (
-        <div className="absolute inset-0 bg-gradient-to-b from-red-600/[0.04] to-transparent opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none rounded-2xl" />
-      )}
-
-      {/* Top strip: flag + badge */}
-      <div className="relative px-3.5 pt-3.5">
-        <div className="flex justify-between items-start">
-          <span className="text-lg leading-none" title={countryMeta?.name}>
-            {countryMeta?.flag || '🌐'}
-          </span>
-          {isOutOfStock ? (
-            <span className="text-[9px] font-black text-gray-500 bg-white/5 border border-white/10 px-2 py-0.5 rounded-md uppercase tracking-widest">Habis</span>
-          ) : (item.isTrending ?? getIsTrending(item.countryId, item.serviceId)) ? (
-            <span className="text-[9px] font-black text-white bg-amber-500 px-2 py-0.5 rounded-md flex items-center gap-1 shadow-[0_0_8px_rgba(245,158,11,0.5)]">
-              <Flame className="w-2.5 h-2.5" /> HOT
-            </span>
-          ) : stockCount !== null && stockCount < 50 ? (
-            <span className="text-[9px] font-black text-amber-400 bg-amber-500/10 border border-amber-500/20 px-2 py-0.5 rounded-md uppercase tracking-widest">Sedikit</span>
-          ) : null}
-        </div>
-      </div>
-
-      {/* Card body */}
-      <div className="px-3.5 pt-3 pb-4 flex flex-col flex-1">
-        <div className="flex items-center gap-2.5 mb-3">
-          <ServiceIcon service={service} className="w-9 h-9 shrink-0 text-base" />
-          <h3 className="text-sm font-bold text-white leading-tight line-clamp-2">{service.name}</h3>
-        </div>
-        <div className="flex items-center gap-1.5 mb-4">
-          <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${isOutOfStock ? 'bg-red-600' : stockCount !== null && stockCount < 50 ? 'bg-amber-400' : 'bg-green-500'}`} />
-          <span className={`text-[10px] font-bold ${isOutOfStock ? 'text-red-500/70' : stockCount !== null && stockCount < 50 ? 'text-amber-400/80' : 'text-green-500/80'}`}>
-            {isOutOfStock ? 'Stok Habis' : stockCount !== null ? `${stockCount.toLocaleString('id-ID')} tersedia` : 'Tersedia'}
-          </span>
-        </div>
-        <div className="mt-auto pt-3 border-t border-white/[0.06] flex items-end justify-between gap-2">
-          <div>
-            <p className="text-[9px] text-gray-600 font-bold uppercase tracking-widest mb-0.5">Mulai dari</p>
-            <p className={`text-base font-black tracking-tight leading-none ${isOutOfStock ? 'text-gray-600 line-through' : 'text-white'}`}>
-              <FormatRupiah value={startingPrice} />
-            </p>
-          </div>
-          {!isOutOfStock && (
-            <div className="shrink-0 w-8 h-8 rounded-xl bg-red-600 flex items-center justify-center group-hover:bg-red-500 transition-colors shadow-[0_4px_12px_rgba(220,38,38,0.4)]">
-              <ShoppingCart className="w-3.5 h-3.5 text-white" />
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
+    <button type={type} onClick={onClick} disabled={disabled} className={`${baseStyle} ${variants[variant]} ${className}`}>
+      {children}
+    </button>
   );
-}, (prev, next) =>
-  prev.item.id === next.item.id &&
-  prev.isOutOfStock === next.isOutOfStock &&
-  prev.stockCount === next.stockCount &&
-  prev.startingPrice === next.startingPrice
+};
+
+const Card = ({ children, className = '', hover = false }) => (
+  <div className={`${THEME.glass} shadow-[0_8px_32px_rgba(0,0,0,0.5),inset_0_1px_0_rgba(255,255,255,0.05)] ${hover ? 'hover:border-red-500/25 hover:shadow-[0_12px_48px_rgba(0,0,0,0.6),0_0_20px_rgba(220,38,38,0.06),inset_0_1px_0_rgba(255,255,255,0.07)] hover:-translate-y-0.5 transition-all duration-300 cursor-pointer' : ''} rounded-2xl p-5 md:p-6 ${className}`}>
+    {children}
+  </div>
 );
 
-// ---
-export default memo(function BuyNumberPage({ user, balance, showToast, navigate, inventory, maintenance }) {
-  // ✅ RATE LIMIT: Cegah spam beli nomor — cooldown 30 detik antar pembelian
-  const lastBuyRef = useRef<number>(0);
-  const [search, setSearch] = useState('');
-
-  // ✅ Provider selection — disimpan ke localStorage agar tidak reset
-  const [provider, setProvider] = useState<'5sim' | 'smsactivate'>(() => {
-    if (typeof window !== 'undefined') {
-      return (localStorage.getItem('pn_provider') as '5sim' | 'smsactivate') || '5sim';
-    }
-    return '5sim';
-  });
-  const handleProviderChange = (p: '5sim' | 'smsactivate') => {
-    setProvider(p);
-    localStorage.setItem('pn_provider', p);
-    setLiveStocks({});
-    setStockApiError(false);
-    // Reset negara ke default masing-masing provider
-    const defaultCountry = p === '5sim' ? 'indonesia' : '6';
-    setSelectedCountry(defaultCountry);
-    localStorage.setItem('pn_selected_country', defaultCountry);
+const Badge = ({ children, variant = 'info' }) => {
+  const variants = {
+    info: 'bg-blue-500/10 text-blue-400 border-blue-500/20',
+    success: 'bg-green-500/10 text-green-400 border-green-500/20',
+    warning: 'bg-yellow-500/10 text-yellow-400 border-yellow-500/20',
+    premium: 'bg-red-500/20 text-red-300 border-red-500/30 shadow-[0_0_10px_rgba(220,38,38,0.2)]',
+    admin: 'bg-purple-500/20 text-purple-300 border-purple-500/30 shadow-[0_0_10px_rgba(168,85,247,0.2)]',
+    failed: 'bg-red-500/10 text-red-400 border-red-500/20'
   };
+  return (
+    <span className={`px-3 py-1 rounded-full text-xs font-bold border tracking-wide uppercase ${variants[variant]}`}>
+      {children}
+    </span>
+  );
+};
 
-  // ✅ FIX: Pilihan negara disimpan ke localStorage — tidak reset saat cancel/refresh
-  const [selectedCountry, setSelectedCountry] = useState<string>(() => {
-    if (typeof window !== 'undefined') {
-      return localStorage.getItem('pn_selected_country') || 'indonesia';
-    }
-    return 'indonesia';
-  });
-  const [selectedCategory, setSelectedCategory] = useState('all'); 
-  const [countryDropdownOpen, setCountryDropdownOpen] = useState(false);
-  const countryDropdownRef = useRef(null);
+const formatRupiah = (value: number): string => {
+  const safeValue = isNaN(value) ? 0 : value;
+  return new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', minimumFractionDigits: 0 }).format(safeValue);
+};
 
-  // ✅ Daftar negara DINAMIS dari 5sim (default: COUNTRIES_STATIC sebagai fallback)
-  const [availableCountries, setAvailableCountries] = useState(COUNTRIES_STATIC);
-  const [isFetchingCountries, setIsFetchingCountries] = useState(true);
+const FormatRupiah = ({ value }: { value: number }) => <>{formatRupiah(value)}</>;
 
-  // Fetch daftar negara dari provider aktif saat pertama load
-  useEffect(() => {
-    const fetchCountries = async () => {
-      setIsFetchingCountries(true);
-      try {
-        const endpoint = provider === '5sim' ? '/api/get-countries' : '/api/smsactivate/get-countries';
-        const res2 = await fetch(endpoint, { cache: 'no-store' });
-        if (res2.ok) {
-          const data = await res2.json();
-          if (data.countries && Array.isArray(data.countries) && data.countries.length > 0) {
-            let countries = data.countries;
-            // ✅ FIX: Pastikan Indonesia selalu ada untuk SMS-Activate (SA id: 6)
-            if (provider === 'smsactivate') {
-              const hasIndonesia = countries.some(c => String(c.id) === '6' || c.id === 'indonesia');
-              if (!hasIndonesia) {
-                countries = [
-                  { id: '6', name: 'Indonesia', flag: '🇮🇩', code: '+62' },
-                  ...countries
-                ];
-              }
-            }
-            setAvailableCountries(countries);
-          }
-        }
-      } catch {
-        // Gagal fetch? Tetap pakai COUNTRIES_STATIC — tidak masalah
-      } finally {
-        setIsFetchingCountries(false);
-      }
-    };
-    fetchCountries();
-  }, [provider]);
-  
-  // State untuk Live Stock dari 5sim
-  const [liveStocks, setLiveStocks] = useState({});
-  const [isFetchingStock, setIsFetchingStock] = useState(false);
-  const [stockApiError, setStockApiError] = useState(false); // true = API gagal, data tidak real
+const getNumericId = (uid) => {
+  if (!uid) return '';
 
-  const [showModal, setShowModal] = useState(false);
-  const [itemToBuy, setItemToBuy] = useState(null);
-  const [selectedTier, setSelectedTier] = useState('reguler'); 
-  const [isProcessing, setIsProcessing] = useState(false);
-  // Swipe-to-dismiss state
-  const [swipeDelta, setSwipeDelta] = useState(0);
-  const swipeTouchStartY = useRef(0);
-  const swipeScrollRef = useRef<HTMLDivElement>(null);
+// ── MAIN EXPORT ─────────────────────────────────────────────────────────────
+export default function LandingPage({ navigate, inventory }) {
+  const [selectedCountry, setSelectedCountry] = React.useState('indonesia');
+  const [countryDropdownOpen, setCountryDropdownOpen] = React.useState(false);
+  const [openFaq, setOpenFaq] = React.useState(null);
+  const [liveStocks, setLiveStocks] = React.useState({});
+  const [isFetchingStock, setIsFetchingStock] = React.useState(false);
+  const [legalModal, setLegalModal] = React.useState({ open: false, tab: 'terms-id' });
+  const [tick, setTick] = React.useState(0);
 
-  // ✅ FIX BUG DROPDOWN: Gunakan mousedown + ref untuk deteksi klik di luar
-  // Sebelumnya pakai { capture: true } yang menangkap klik SEBELUM onClick item negara selesai
-  // Akibatnya item negara tidak pernah terpilih karena DOM sudah di-unmount duluan
-  useEffect(() => {
-    if (!countryDropdownOpen) return;
-    const handler = (e) => {
-      if (countryDropdownRef.current && !countryDropdownRef.current.contains(e.target)) {
-        setCountryDropdownOpen(false);
-      }
-    };
-    document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
-  }, [countryDropdownOpen]);
+  // Fake live OTP codes cycling
+  const otpExamples = [
+    { app: 'WhatsApp', code: '847 291', flag: '🇮🇩' },
+    { app: 'Telegram', code: '593 014', flag: '🇺🇸' },
+    { app: 'TikTok',   code: '261 837', flag: '🇮🇩' },
+    { app: 'Shopee',   code: '904 153', flag: '🇲🇾' },
+    { app: 'Gojek',    code: '738 620', flag: '🇮🇩' },
+    { app: 'Discord',  code: '445 088', flag: '🇯🇵' },
+  ];
+  React.useEffect(() => {
+    const t = setInterval(() => setTick(n => n + 1), 2500);
+    return () => clearInterval(t);
+  }, []);
+  const currentOtp = otpExamples[tick % otpExamples.length];
 
-  // FUNGSI UNTUK MENARIK STOK LIVE DARI FRONTEND
   useEffect(() => {
     const controller = new AbortController();
-    const fetchStock = async () => {
+    const go = async () => {
       setIsFetchingStock(true);
       try {
-        // ── 5SIM ─────────────────────────────────────────────────────────────
-        if (provider === '5sim') {
-          const simCountry = mapCountryTo5Sim(selectedCountry);
-          const res = await fetch(`/api/live-stock?country=${simCountry}`, { cache: 'no-store', signal: controller.signal });
-          if (!res.ok) throw new Error("Gagal mengambil data live dari 5sim");
-          const data = await res.json();
-
-          if (typeof data === 'string' && (data.includes('no free phones') || data.includes('service_not_available') || data.includes('no product') || data.includes('not found'))) {
-            throw new Error("Layanan tidak tersedia sementara");
-          }
-          if (data?.error) {
-            const errMsg = String(data.error).toLowerCase();
-            if (errMsg.includes('no_balance') || errMsg.includes('not enough') || errMsg.includes('insufficient') || errMsg.includes('saldo')) {
-              throw new Error('__SILENT_FALLBACK__');
-            }
-            throw new Error(data.error);
-          }
-
-          const firstKey = Object.keys(data)[0];
-          const firstVal = firstKey ? data[firstKey] : null;
-          const firstInnerKey = firstVal && typeof firstVal === 'object' ? Object.keys(firstVal)[0] : null;
-          const firstInnerVal = firstInnerKey ? firstVal[firstInnerKey] : null;
-          const hasCountryWrapper = firstInnerVal && typeof firstInnerVal === 'object'
-            && !('cost' in firstInnerVal) && !('count' in firstInnerVal);
-          const servicesData = hasCountryWrapper ? firstVal : data;
-
-          if (!servicesData || typeof servicesData !== 'object' || Object.keys(servicesData).length === 0) {
-            throw new Error("Data negara tidak ditemukan di 5sim");
-          }
-
-          const stocks = {};
-          Object.keys(servicesData).forEach(simServiceName => {
-            const ourServiceId = mapServiceFrom5Sim(simServiceName);
-            let totalCount = 0;
-            let minCostUsd = Infinity;
-            const pricesObj = {};
-            const opData = servicesData[simServiceName];
-            if (opData && typeof opData === 'object') {
-              Object.keys(opData).forEach(operator => {
-                const entry = opData[operator];
-                if (!entry || typeof entry !== 'object') return;
-                const opCount = entry.count || 0;
-                totalCount += opCount;
-                if (opCount > 0 && entry.cost && entry.cost < minCostUsd) minCostUsd = entry.cost;
-              });
-              const tierMapOp = {
-                'any':'cheap','virtual1':'cheap','virtual3':'cheap','virtual4':'cheap','virtual14':'cheap',
-                'virtual53':'reguler','virtual21':'reguler','virtual11':'reguler','virtual36':'reguler','virtual5':'reguler','virtual7':'reguler',
-                'virtual58':'vip','virtual60':'vip','virtual62':'vip',
-              } as {[k:string]:string};
-              const availableOps = Object.keys(opData)
-                .filter(op => opData[op] && typeof opData[op] === 'object' && (opData[op].count || 0) > 0)
-                .sort((a, b) => (opData[a].cost || 9999) - (opData[b].cost || 9999));
-              availableOps.forEach((op, idx) => {
-                const entry = opData[op];
-                const tierName = tierMapOp[op] || (idx === 0 ? 'cheap' : idx === 1 ? 'reguler' : 'vip');
-                if (!pricesObj[tierName]) {
-                  pricesObj[tierName] = { price: calcPriceFromUsd(entry.cost), rate: entry.rate || 0, nameOp: op };
-                }
-              });
-              const cheapestTierPrice = Object.values(pricesObj).length > 0
-                ? Math.min(...Object.values(pricesObj).map(p => p.price))
-                : (minCostUsd !== Infinity ? calcPriceFromUsd(minCostUsd) : 0);
-              stocks[ourServiceId] = { count: totalCount, minPrice: cheapestTierPrice, prices: pricesObj, rawOps: opData };
-            }
-          });
-
-          setLiveStocks(stocks);
-          setStockApiError(false);
-
-        // ── SMS-ACTIVATE ─────────────────────────────────────────────────────
-        } else {
-          const countryId = mapCountryToSmsActivate(selectedCountry);
-
-          const res = await fetch(`/api/smsactivate/live-stock?country=${countryId}`, { cache: 'no-store', signal: controller.signal });
-          if (!res.ok) throw new Error("Gagal mengambil data live dari SMS-Activate");
-          const data = await res.json();
-
-          if (data?.error) throw new Error(data.error);
-
-          // data.services: { [serviceCode]: { cost, count } }
-          const stocks = {};
-          Object.entries(data.services || {}).forEach(([serviceCode, info]: [string, any]) => {
-            if (!info || !info.count || Number(info.count) === 0) return;
-            const ourServiceId = mapServiceFromSmsActivate(serviceCode);
-            const priceIdr = calcPriceFromUsd(Number(info.cost));
-            stocks[ourServiceId] = {
-              count:    Number(info.count),
-              minPrice: priceIdr,
-              prices:   { reguler: { price: priceIdr, rate: 90, nameOp: 'SA' } },
-              rawOps:   {},
-              saName:   info.name || null, // nama asli dari SA jika tersedia
-              saCode:   serviceCode,       // kode asli SA untuk fallback display
-            };
-          });
-
-          setLiveStocks(stocks);
-          setStockApiError(false);
-        }
-
-      } catch (err) {
-        if (err.name === 'AbortError') return;
-        if (err.message !== '__SILENT_FALLBACK__') {
-          if (process.env.NODE_ENV === 'development') console.warn("Stok live tidak tersedia:", err.message);
-        }
-        setStockApiError(true);
-        setLiveStocks({});
-      } finally {
-        setIsFetchingStock(false);
-      }
-    };
-    
-    fetchStock();
-    return () => controller.abort();
-  }, [selectedCountry, provider]);
-
-  // ✅ BUILD KATALOG LANGSUNG DARI DATA LIVE
-  // Untuk SMS-Activate: semua service dari liveStocks ditampilkan,
-  // termasuk yang kodenya tidak dikenal (fallback ke raw key).
-  // SERVICES hanya dipakai untuk metadata (nama cantik, ikon, warna).
-  const filteredInventory = useMemo(() => {
-    const baseServiceIds = Object.keys(liveStocks).length > 0
-      ? Object.keys(liveStocks)
-      : SERVICES.map(s => s.id); // fallback jika API belum load
-
-    let list = baseServiceIds.map(serviceId => ({
-      id: selectedCountry + '-' + serviceId,
-      countryId: selectedCountry,
-      serviceId,
-      isTrending: getIsTrending(selectedCountry, serviceId),
-    }));
-
-    // Filter kategori
-    // LOGIKA PENTING: SA sering memakai kode yang sama untuk layanan berbeda di tiap negara.
-    // Mis: kode 'bn' di SA Indonesia = Alfagift (bukan Binance).
-    // Maka kategori harus ditentukan dari saName (nama asli SA) dulu, bukan dari serviceId.
-    if (selectedCategory !== 'all') {
-      list = list.filter(item => {
-        const liveData = liveStocks[item.serviceId];
-
-        // PRIORITAS 1: Cari kategori berdasarkan saName (nama asli dari SA)
-        if (liveData?.saName) {
-          const saNameLower = liveData.saName.toLowerCase().trim();
-          // Cek di SERVICES berdasarkan nama
-          const byName = SERVICES.find(s => s.name.toLowerCase() === saNameLower);
-          if (byName) return byName.category === selectedCategory;
-          // Cek di SERVICE_ICON_MAP (normalize saName → potential key)
-          const saKey = saNameLower.replace(/[\s\/\-\.]+/g, '_').replace(/[^a-z0-9_]/g, '');
-          if (SERVICE_ICON_MAP[saKey]) return SERVICE_ICON_MAP[saKey].category === selectedCategory;
-          if (SERVICE_ICON_MAP[saNameLower]) return SERVICE_ICON_MAP[saNameLower].category === selectedCategory;
-          // saName tidak dikenal → tampilkan di 'Lainnya' saja
-          return selectedCategory === 'other';
-        }
-
-        // PRIORITAS 2: Fallback ke kategori serviceId (untuk SERVER 1 / 5sim)
-        const srv = SERVICES.find(s => s.id === item.serviceId);
-        if (srv) return srv.category === selectedCategory;
-        const mapped = SERVICE_ICON_MAP[item.serviceId];
-        return mapped ? mapped.category === selectedCategory : false;
-      });
-    }
-
-    // Filter pencarian by nama atau serviceId (termasuk saName dari SA)
-    if (search) {
-      const q = search.toLowerCase();
-      list = list.filter(item => {
-        const liveData = liveStocks[item.serviceId];
-        const srv = SERVICES.find(s => s.id === item.serviceId);
-        const displayName = liveData?.saName || srv?.name || item.serviceId.replace(/_/g, ' ');
-        return displayName.toLowerCase().includes(q) || item.serviceId.toLowerCase().includes(q);
-      });
-    }
-
-    // Sort: stok terbanyak di atas, habis di bawah
-    list.sort((a, b) => {
-      const aCount = liveStocks[a.serviceId]?.count ?? -1;
-      const bCount = liveStocks[b.serviceId]?.count ?? -1;
-      if (aCount > 0 && bCount <= 0) return -1;
-      if (bCount > 0 && aCount <= 0) return 1;
-      return bCount - aCount;
-    });
-
-    return list;
-  }, [liveStocks, selectedCountry, search, selectedCategory]);
-
-  const handleBuyClick = (item) => {
-    setItemToBuy(item);
-    // ✅ FIX BUG #3: Pilih tier default yang benar-benar tersedia, bukan selalu 'reguler'
-    const liveData = liveStocks[item.serviceId];
-    const availablePrices = liveData?.prices || {};
-    const preferredOrder = ['reguler', 'vip', 'cheap'];
-    const defaultTier = preferredOrder.find(t => availablePrices[t]) || Object.keys(availablePrices)[0] || 'reguler';
-    setSelectedTier(defaultTier);
-    setShowModal(true);
-  };
-
-  const currentTiers = useMemo(() => {
-    if (!itemToBuy) return null;
-    const liveInfo = liveStocks[itemToBuy.serviceId];
-
-    if (!liveInfo || Object.keys(liveInfo.prices || {}).length === 0) return null;
-
-    const tiers = {} as any;
-    if (liveInfo.prices?.cheap) {
-      tiers.cheap = { id: 'cheap', name: 'Server Random (Any)', desc: 'Operator Acak', success: Math.max(75, liveInfo.prices.cheap.rate || 75) + '%', price: liveInfo.prices.cheap.price, opKey: liveInfo.prices.cheap.nameOp || 'any', recommended: false };
-    }
-    if (liveInfo.prices?.reguler) {
-      const isCustomOp = liveInfo.prices.reguler.nameOp;
-      tiers.reguler = { id: 'reguler', name: isCustomOp === 'SA' ? 'Server 2' : isCustomOp ? `Server ${isCustomOp.toUpperCase()}` : 'Server VIRTUAL53', desc: 'Standar & Stabil', success: Math.max(88, liveInfo.prices.reguler.rate || 88) + '%', price: liveInfo.prices.reguler.price, opKey: isCustomOp || 'virtual53', recommended: true };
-    }
-    if (liveInfo.prices?.vip) {
-      tiers.vip = { id: 'vip', name: 'Server VIP (V58)', desc: 'Prioritas Tertinggi, Anti-Delay', success: Math.max(99, liveInfo.prices.vip.rate || 99) + '%', price: liveInfo.prices.vip.price, opKey: liveInfo.prices.vip.nameOp || 'virtual58', recommended: false };
-    }
-    // Sembunyikan cheap jika harganya >= reguler (any lebih mahal/sama = tidak ada nilai tambah)
-    if (tiers.cheap && tiers.reguler && tiers.cheap.price >= tiers.reguler.price) {
-      delete tiers.cheap;
-    }
-    // Sembunyikan cheap jika harganya >= vip (tidak masuk akal ditampilkan)
-    if (tiers.cheap && tiers.vip && tiers.cheap.price >= tiers.vip.price) {
-      delete tiers.cheap;
-    }
-    // Kalau hanya cheap yang tersisa (tidak ada reguler/vip), beri nama lebih netral
-    if (tiers.cheap && !tiers.reguler && !tiers.vip) {
-      tiers.cheap.name = 'Server Standar';
-      tiers.cheap.recommended = true;
-    }
-    return tiers;
-  }, [itemToBuy, liveStocks]);
-
-  // Jika tier yang diplih default ('reguler') ternyata tidak tersedia, otomatis pilih tier pertama yang tersedia
-  useEffect(() => {
-      if (currentTiers && !currentTiers[selectedTier]) {
-          const availableKeys = Object.keys(currentTiers);
-          if (availableKeys.length > 0) setSelectedTier(availableKeys[0]);
-      }
-  }, [currentTiers, selectedTier]);
-
-  const confirmPurchase = async () => {
-    // ✅ SECURITY: Double-submit guard — cegah dua transaksi dari klik cepat
-    if (isProcessing) return;
-    if (!currentTiers || !currentTiers[selectedTier]) return;
-    const finalPriceToPay = currentTiers[selectedTier].price;
-    const exactOperator = currentTiers[selectedTier].opKey;
-
-    // ✅ MAINTENANCE CHECK: Blokir pembelian saat maintenance aktif
-    if (maintenance?.isActive) {
-      showToast(maintenance.message || 'Sistem sedang maintenance. Coba lagi nanti.', 'error');
-      return;
-    }
-
-    // ✅ RATE LIMIT: Cooldown 30 detik antar pembelian untuk cegah spam
-    const now = Date.now();
-    const elapsed = now - lastBuyRef.current;
-    const COOLDOWN_MS = 30_000;
-    if (lastBuyRef.current > 0 && elapsed < COOLDOWN_MS) {
-      const sisa = Math.ceil((COOLDOWN_MS - elapsed) / 1000);
-      showToast(`Tunggu ${sisa} detik sebelum beli lagi.`, 'error');
-      return;
-    }
-
-    // ✅ FIX: Gunakan Math.floor untuk menghindari masalah floating point
-    const currentBalance = Math.floor(balance);
-    const priceNeeded = Math.ceil(finalPriceToPay);
-    if (currentBalance < priceNeeded) {
-      const kekurangan = priceNeeded - currentBalance;
-      showToast(
-        `Saldo tidak cukup! Butuh Rp ${priceNeeded.toLocaleString('id-ID')} — Saldo kamu Rp ${currentBalance.toLocaleString('id-ID')} (kurang Rp ${kekurangan.toLocaleString('id-ID')}).`,
-        'error'
-      );
-      setShowModal(false);
-      navigate('dash_deposit');
-      return;
-    }
-
-    // ✅ VALIDASI STOK + HARGA REAL-TIME sebelum potong saldo
-    setIsProcessing(true);
-    try {
-      if (provider === '5sim') {
-        const simCountry = mapCountryTo5Sim(itemToBuy.countryId);
-        const simServiceName = mapServiceTo5Sim(itemToBuy.serviceId);
-        const stockCheck = await fetch(`/api/live-stock?country=${simCountry}`, { cache: 'no-store' });
-        if (stockCheck.ok) {
-          const stockData = await stockCheck.json();
-          const fk = Object.keys(stockData)[0];
-          const fv = fk ? stockData[fk] : null;
-          const fik = fv && typeof fv === 'object' ? Object.keys(fv)[0] : null;
-          const fiv = fik ? fv[fik] : null;
-          const hasWrapper = fiv && typeof fiv === 'object' && !('cost' in fiv) && !('count' in fiv);
-          const svcMap = hasWrapper ? fv : stockData;
-
-          if (svcMap && typeof svcMap === 'object') {
-            const svcData = svcMap[simServiceName];
-            if (svcData) {
-              const opData = svcData[exactOperator];
-              const opStock = opData?.count || 0;
-              const totalCount = Object.values(svcData).reduce((s, op) => {
-                if (!op || typeof op !== 'object') return s;
-                return s + (op.count || 0);
-              }, 0);
-
-              if (opStock === 0 || totalCount === 0) {
-                showToast(
-                  opStock === 0
-                    ? `Operator "${exactOperator}" sudah habis. Coba tier lain.`
-                    : 'Stok habis! Layanan ini sedang tidak tersedia.',
-                  'error'
-                );
-                setShowModal(false);
-                setLiveStocks(prev => ({
-                  ...prev,
-                  [itemToBuy.serviceId]: {
-                    ...(prev[itemToBuy.serviceId] || {}),
-                    count: totalCount,
-                    prices: totalCount === 0
-                      ? {}
-                      : Object.fromEntries(
-                          Object.entries(prev[itemToBuy.serviceId]?.prices || {})
-                            .filter(([key]) => {
-                              const p = prev[itemToBuy.serviceId]?.prices?.[key];
-                              return p?.opKey !== exactOperator;
-                            })
-                        )
-                  }
-                }));
-                setIsProcessing(false);
-                return;
-              }
-
-              if (opData?.cost) {
-                const currentLivePrice = calcPriceFromUsd(opData.cost);
-                const priceDiff = Math.abs(currentLivePrice - finalPriceToPay);
-                if (priceDiff > 200) {
-                  showToast(
-                    `Harga berubah! Sekarang ${new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', minimumFractionDigits: 0 }).format(currentLivePrice)}. Silakan cek ulang.`,
-                    'error'
-                  );
-                  setLiveStocks(prev => {
-                    const prevSvc = prev[itemToBuy.serviceId] || {};
-                    const updatedPrices = { ...prevSvc.prices };
-                    const tierKey = Object.keys(updatedPrices).find(k => updatedPrices[k].opKey === exactOperator);
-                    if (tierKey) updatedPrices[tierKey] = { ...updatedPrices[tierKey], price: currentLivePrice };
-                    return { ...prev, [itemToBuy.serviceId]: { ...prevSvc, prices: updatedPrices, minPrice: currentLivePrice } };
-                  });
-                  setShowModal(false);
-                  setIsProcessing(false);
-                  return;
-                }
-              }
-            }
-          }
-        }
-      }
-      // SMS-Activate: skip stock re-check (realtime sudah dari fetchStock)
-    } catch (_) {
-      // Jika validasi ulang gagal, lanjutkan dan biarkan backend menangani
-    }
-
-    try {
-      const buyEndpoint = provider === '5sim' ? '/api/buy-number' : '/api/smsactivate/buy-number';
-
-      if (provider === '5sim') {
-        // ✅ SECURITY: TIDAK mengirim `price` dari client ke backend.
-        await secureApiCall(buyEndpoint, {
-          countryId:       itemToBuy.countryId,
-          serviceId:       itemToBuy.serviceId,
-          operator:        exactOperator,
-          idempotencyKey:  crypto.randomUUID(),
-        });
-      } else {
-        // SMS-Activate: kirim kode SA asli (bukan serviceId kita)
-        // liveStocks[serviceId].saCode menyimpan kode asli SA (mis: 'wa', 'tg', 'go')
-        // yang di-mapping saat fetch catalog. Tanpa ini SA tolak request
-        // karena tidak mengenal 'whatsapp', 'telegram', dsb.
-        // Kirim kode SA asli (mis: 'wa') sebagai service,
-        // dan internal serviceId kita (mis: 'whatsapp') agar route.ts
-        // bisa simpan nama yang benar untuk display di UI
-        const saServiceCode = liveStocks[itemToBuy.serviceId]?.saCode || itemToBuy.serviceId;
-        const saDisplayName = liveStocks[itemToBuy.serviceId]?.saName || null;
-        // ✅ FIX: Kirim clientPrice (harga yang ditampilkan ke user) ke backend.
-        // Backend TIDAK pakai nilai ini langsung — hanya digunakan untuk
-        // validasi bahwa harga server-side tidak bergeser lebih dari Rp 500.
-        // Ini memastikan user selalu bayar harga yang mereka lihat di modal.
-        await secureApiCall(buyEndpoint, {
-          service:     saServiceCode,            // kode SA untuk API call
-          serviceId:   itemToBuy.serviceId,      // ID internal untuk display UI
-          country:     mapCountryToSmsActivate(itemToBuy.countryId),
-          saName:      saDisplayName,            // nama asli dari SA untuk mutasi
-          clientPrice: finalPriceToPay,          // harga yg terlihat user → untuk validasi backend
-        });
-      }
-
-      setShowModal(false);
-      lastBuyRef.current = Date.now(); // ✅ RATE LIMIT: catat waktu beli terakhir
-      showToast('Nomor berhasil diamankan! Menunggu OTP...', 'success');
-      navigate('dash_history');
-    } catch (error) {
-      setShowModal(false);
-      // Terjemahkan error teknis dari 5sim ke pesan yang lebih ramah
-      let friendlyMsg = error.message || 'Terjadi kesalahan sistem.';
-
-      // ✅ FIX: Handle 409 harga berubah dari backend SA.
-      // Backend membatalkan order SA secara otomatis dan mengembalikan harga terbaru.
-      // Refresh harga di liveStocks agar modal langsung tunjukkan harga baru jika user buka lagi.
-      if (friendlyMsg.includes('Harga berubah')) {
-        // Coba ekstrak harga baru dari error jika tersedia (format: "Harga terbaru: Rp X")
-        const priceMatch = friendlyMsg.match(/Rp\s*([\d.]+)/);
-        if (priceMatch && itemToBuy) {
-          const newPrice = parseInt(priceMatch[1].replace(/\./g, ''), 10);
-          if (!isNaN(newPrice) && newPrice > 0) {
-            setLiveStocks(prev => {
-              const prevSvc = prev[itemToBuy.serviceId] || {};
-              const updatedPrices = { ...prevSvc.prices };
-              // Update semua tier dengan harga baru (estimasi — backend akan konfirmasi saat reload)
-              Object.keys(updatedPrices).forEach(k => {
-                updatedPrices[k] = { ...updatedPrices[k], price: newPrice };
-              });
-              return { ...prev, [itemToBuy.serviceId]: { ...prevSvc, prices: updatedPrices, minPrice: newPrice } };
+        const simCountry = mapCountryTo5Sim(selectedCountry);
+        const res = await fetch(`/api/live-stock?country=${simCountry}`, { cache: 'no-store', signal: controller.signal });
+        if (!res.ok) throw new Error('');
+        const data = await res.json();
+        const firstKey = Object.keys(data)[0];
+        const firstVal = firstKey ? data[firstKey] : null;
+        const firstInner = firstVal && typeof firstVal === 'object' ? Object.keys(firstVal)[0] : null;
+        const firstInnerVal = firstInner ? firstVal[firstInner] : null;
+        const hasWrapper = firstInnerVal && typeof firstInnerVal === 'object' && !('cost' in firstInnerVal);
+        const svc = hasWrapper ? firstVal : data;
+        if (!svc) throw new Error('');
+        const s = {};
+        Object.keys(svc).forEach(n => {
+          const id = mapServiceFrom5Sim(n);
+          let cnt = 0, min = Infinity;
+          const op = svc[n];
+          if (op && typeof op === 'object') {
+            Object.keys(op).forEach(k => {
+              const e = op[k];
+              if (!e) return;
+              cnt += e.count || 0;
+              if ((e.count||0) > 0 && e.cost && e.cost < min) min = e.cost;
             });
+            s[id] = { count: cnt, minPrice: min !== Infinity ? calcPriceFromUsd(min) : 0 };
           }
-        }
-        showToast(friendlyMsg, 'error');
-        setIsProcessing(false);
-        return;
-      }
+        });
+        setLiveStocks(s);
+      } catch { setLiveStocks({}); }
+      finally { setIsFetchingStock(false); }
+    };
+    go();
+    return () => controller.abort();
+  }, [selectedCountry]);
 
-      if (
-        friendlyMsg.includes('no product') ||
-        friendlyMsg.includes('Response tidak valid dari 5sim') ||
-        friendlyMsg.includes('not found')
-      ) {
-        const isEst = !liveStocks[itemToBuy?.serviceId];
-        friendlyMsg = isEst
-          ? `Layanan ${SERVICES.find(s => s.id === itemToBuy?.serviceId)?.name || ''} tidak tersedia di negara ini. Coba negara lain (Rusia, Vietnam, India biasanya tersedia). Saldo tidak terpotong.`
-          : 'Stok habis mendadak. Silakan coba lagi atau ganti negara.';
-      }
-      // Sembunyikan pesan teknis internal dari user biasa
-      if (
-        friendlyMsg.toLowerCase().includes('saldo pusat') ||
-        friendlyMsg.toLowerCase().includes('5sim') ||
-        friendlyMsg.toLowerCase().includes('no_balance') ||
-        friendlyMsg.toLowerCase().includes('not enough') ||
-        friendlyMsg.toLowerCase().includes('insufficient')
-      ) {
-        friendlyMsg = 'Layanan sedang dalam pemeliharaan sementara. Silakan coba beberapa saat lagi atau hubungi support kami.';
-      }
-      showToast(friendlyMsg, 'error');
-    } finally {
-      setIsProcessing(false);
-    }
-  };
+  const publicInventory = inventory.filter(i => i.countryId === selectedCountry).slice(0, 8);
+
+  const FAQS = [
+    { q: 'Cara kerjanya gimana?', a: 'Deposit → pilih app & negara → bayar → nomor muncul. Masukkan ke aplikasi, OTP masuk dalam hitungan detik ke dashboard kamu.', icon: '01' },
+    { q: 'Nomor aktif berapa lama?', a: 'Sekali pakai, aktif 10–20 menit. Cukup untuk terima 1 kode OTP, habis itu nomor otomatis hangus.', icon: '02' },
+    { q: 'Kalau OTP ga masuk gimana?', a: 'Auto-Refund. Kalau OTP tidak masuk sampai timeout, pesanan dibatalkan dan saldo kembali 100% otomatis tanpa perlu chat admin.', icon: '03' },
+    { q: 'Aman ga buat akun utama?', a: 'Aman. Nomor virtual hanya untuk verifikasi sekali pakai — setelah OTP diterima, nomor tidak bisa digunakan lagi oleh siapapun.', icon: '04' },
+  ];
 
   return (
-    <div className="max-w-7xl mx-auto flex flex-col h-[calc(100vh-120px)] md:h-[calc(100vh-160px)]">
-      <div className="mb-4 md:mb-8 space-y-4 md:space-y-6 flex-shrink-0">
-        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-          <h2 className="text-2xl md:text-4xl font-black text-white uppercase tracking-tight">Katalog <span className="text-red-500">Nomor</span></h2>
-          <ProviderToggle provider={provider} onChange={handleProviderChange} />
-        </div>
-        
-        <div className="flex flex-col gap-4 bg-[#140505] p-4 rounded-2xl border border-red-900/30">
-          <div className="flex flex-col xl:flex-row gap-4 items-start xl:items-center">
-            <div className="relative flex-1 w-full">
-              <Search className="absolute left-5 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
-              <input 
-                type="text" 
-                placeholder="Cari dari 90+ layanan (cth: PayPal, Binance, Gojek)..." 
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                className={`w-full bg-black border border-red-900/30 rounded-xl py-4 pl-14 pr-4 text-white font-bold placeholder-gray-600 focus:outline-none focus:border-red-500 focus:ring-1 focus:ring-red-500 transition-all`}
-              />
-            </div>
-            
-            <div ref={countryDropdownRef} className="relative w-full xl:w-72 shrink-0 z-20">
-              <button 
-                onClick={() => setCountryDropdownOpen(prev => !prev)}
-                className="w-full bg-black border border-red-900/30 hover:border-red-500/50 transition-colors rounded-xl py-4 px-5 flex items-center justify-between shadow-inner"
-              >
-                <span className="flex items-center gap-3 text-white font-bold">
-                  <span className="text-xl">{getCountryDisplay(selectedCountry, availableCountries).flag}</span>
-                  <span className="truncate">{getCountryDisplay(selectedCountry, availableCountries).name}</span>
-                </span>
-                <div className="flex items-center gap-2">
-                  {isFetchingCountries && <Loader2 className="w-3 h-3 animate-spin text-gray-500" />}
-                  <ChevronDown className={`w-5 h-5 text-gray-500 transition-transform ${countryDropdownOpen ? 'rotate-180 text-red-500' : ''}`} />
-                </div>
-              </button>
+    <div className="bg-[#000000] overflow-x-hidden">
+      <style>{`
+        @keyframes mq { 0%{transform:translateX(0)} 100%{transform:translateX(-50%)} }
+        .mq { animation: mq 30s linear infinite; width:max-content; }
+        @keyframes fadeUp { from{opacity:0;transform:translateY(12px)} to{opacity:1;transform:translateY(0)} }
+        .fade-up { animation: fadeUp 0.4s ease forwards; }
+        @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
+        .cursor { animation: blink 1s step-end infinite; }
+        @keyframes float { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-8px)} }
+        .float { animation: float 6s ease-in-out infinite; }
+      `}</style>
 
-              {countryDropdownOpen && (
-                <div className="absolute top-full left-0 w-full mt-2 bg-[#140505] border border-red-500/30 rounded-xl shadow-[0_10px_40px_rgba(220,38,38,0.2)] max-h-72 overflow-y-auto z-50 custom-scrollbar">
-                  <div className="px-3 pt-2 pb-1 sticky top-0 bg-[#140505] border-b border-white/5">
-                    <p className="text-[10px] text-gray-500 font-bold uppercase tracking-widest">{availableCountries.length} negara tersedia</p>
+      {/* ═══ HERO ═══════════════════════════════════════════════════ */}
+      <section className="relative min-h-screen flex flex-col justify-center pt-28 pb-16 overflow-hidden">
+        {/* Background: subtle dot grid */}
+        <div className="absolute inset-0 bg-[#000000]" />
+        <div className="absolute inset-0" style={{backgroundImage:'radial-gradient(rgba(255,255,255,0.025) 1px,transparent 1px)',backgroundSize:'40px 40px'}} />
+        <div className="absolute top-[-100px] right-[-100px] w-[600px] h-[600px] bg-red-700/20 blur-[150px] rounded-full" />
+        <div className="absolute bottom-0 left-[-100px] w-[400px] h-[400px] bg-red-900/10 blur-[120px] rounded-full" />
+
+        <div className="relative z-10 max-w-7xl mx-auto px-6 w-full">
+          {/* Status pill */}
+          <div className="inline-flex items-center gap-2.5 mb-10 bg-white/[0.04] backdrop-blur-xl border border-white/[0.08] px-4 py-2 rounded-full">
+            <span className="w-2 h-2 bg-green-400 rounded-full animate-pulse shadow-[0_0_8px_rgba(74,222,128,0.6)]" />
+            <span className="text-[11px] text-gray-400 font-bold tracking-[0.25em] uppercase">Server aktif · 24/7</span>
+          </div>
+
+          <div className="grid lg:grid-cols-2 gap-12 lg:gap-20 items-center">
+            {/* Headline */}
+            <div>
+              <h1 className="font-black uppercase tracking-tighter leading-[0.82] mb-10">
+                <span className="block text-white" style={{fontSize:'clamp(52px,9vw,120px)'}}>NOMOR</span>
+                <span className="block text-white" style={{fontSize:'clamp(52px,9vw,120px)'}}>VIRTUAL</span>
+                <span className="block" style={{fontSize:'clamp(52px,9vw,120px)',WebkitTextStroke:'2px #ef4444',color:'transparent'}}>OTP</span>
+                <span className="block bg-gradient-to-r from-red-500 via-red-400 to-orange-400 bg-clip-text text-transparent" style={{fontSize:'clamp(52px,9vw,120px)'}}>INSTAN.</span>
+              </h1>
+
+              <p className="text-gray-400 text-lg leading-relaxed mb-10 max-w-md">
+                Beli nomor virtual dari <strong className="text-white">170+ negara</strong>, terima kode OTP dalam detik.
+                Kalau gagal, saldo balik otomatis — <strong className="text-white">no drama</strong>.
+              </p>
+
+              <div className="flex flex-wrap gap-3">
+                <button onClick={() => navigate('register')} className="group inline-flex items-center gap-2 bg-red-600 hover:bg-red-500 text-white font-black text-sm px-8 py-4 rounded-2xl uppercase tracking-widest transition-all shadow-[0_0_40px_rgba(220,38,38,0.4)] hover:shadow-[0_0_60px_rgba(220,38,38,0.6)]">
+                  Mulai Sekarang
+                  <ArrowRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+                </button>
+                <button onClick={() => document.getElementById('harga')?.scrollIntoView({behavior:'smooth'})} className="inline-flex items-center gap-2 bg-white/[0.04] backdrop-blur-xl border border-white/[0.08] hover:bg-white/[0.08] text-gray-400 hover:text-white font-bold text-sm px-8 py-4 rounded-2xl uppercase tracking-widest transition-all">
+                  Lihat Harga
+                </button>
+              </div>
+
+              {/* Trust line */}
+              <div className="flex flex-wrap gap-2 mt-8">
+                {['✓ Gratis daftar','✓ Bayar saat pakai','✓ Auto-refund'].map((t,i) => (
+                  <span key={i} className="bg-white/[0.04] backdrop-blur-xl border border-white/[0.08] text-gray-500 text-[10px] font-bold uppercase tracking-widest px-3 py-1.5 rounded-full">{t}</span>
+                ))}
+              </div>
+            </div>
+
+            {/* OTP Terminal */}
+            <div className="hidden lg:block float">
+              <div className="bg-white/[0.03] backdrop-blur-xl border border-white/[0.08] rounded-3xl overflow-hidden font-mono shadow-[0_32px_80px_rgba(0,0,0,0.8),0_0_40px_rgba(220,38,38,0.08)]">
+                {/* Terminal bar */}
+                <div className="flex items-center gap-2 px-4 py-3 bg-white/[0.02] border-b border-white/[0.06]">
+                  <div className="flex gap-1.5">
+                    <div className="w-3 h-3 rounded-full bg-red-500/60" />
+                    <div className="w-3 h-3 rounded-full bg-yellow-500/40" />
+                    <div className="w-3 h-3 rounded-full bg-green-500/40" />
                   </div>
-                  {availableCountries.map(c => (
-                    <button 
-                      key={c.id}
-                      onClick={() => {
-                        const cid = String(c.id);
-                        setSelectedCountry(cid);
-                        if (typeof window !== 'undefined') localStorage.setItem('pn_selected_country', cid);
-                        setCountryDropdownOpen(false);
-                      }}
-                      className={`w-full text-left px-5 py-3 flex items-center gap-3 transition-colors border-b border-white/5 last:border-0 ${String(selectedCountry) === String(c.id) ? 'bg-red-600/20 text-red-400' : 'text-gray-300 hover:bg-white/5 hover:text-white'}`}
-                    >
-                      <span className="text-xl">{c.flag || '🌐'}</span>
-                      <span className="font-bold">{c.name}</span>
+                  <span className="text-gray-600 text-xs ml-2">pusatnokos — otp-terminal</span>
+                  <div className="ml-auto flex items-center gap-1.5">
+                    <span className="w-1.5 h-1.5 bg-green-400 rounded-full animate-pulse" />
+                    <span className="text-green-400 text-[10px] font-bold">LIVE</span>
+                  </div>
+                </div>
+
+                {/* Terminal content */}
+                <div className="p-6 space-y-4">
+                  <div className="text-gray-600 text-xs">
+                    <span className="text-green-400">$</span> pusatnokos buy --app <span className="text-yellow-300">{currentOtp.app}</span> --country <span className="text-cyan-400">ID</span>
+                  </div>
+
+                  <div className="text-xs space-y-1.5 fade-up" key={tick}>
+                    <div className="text-gray-500">→ Mencari nomor tersedia...</div>
+                    <div className="text-gray-400">→ Nomor ditemukan: <span className="text-white">+62 821-xxxx-xxxx</span></div>
+                    <div className="text-gray-400">→ Menunggu OTP<span className="cursor">_</span></div>
+                  </div>
+
+                  {/* OTP Display */}
+                  <div className="bg-red-500/[0.06] backdrop-blur-xl border border-red-500/20 rounded-2xl p-4 fade-up" key={`otp-${tick}`}>
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-green-400 text-[10px] font-black uppercase tracking-widest">✓ OTP DITERIMA</span>
+                      <span className="text-gray-600 text-[10px]">{currentOtp.flag} {currentOtp.app}</span>
+                    </div>
+                    <div className="text-4xl font-black text-white tracking-[0.25em]">{currentOtp.code}</div>
+                    <div className="text-gray-600 text-[10px] mt-2">Berlaku 5 menit · Jangan bagikan ke siapapun</div>
+                  </div>
+
+                  <div className="text-xs text-gray-600">
+                    <span className="text-green-400">✓</span> Selesai dalam <span className="text-white font-bold">4.2 detik</span>
+                    <span className="mx-2">·</span>
+                    <span className="text-green-400">$</span> <span className="cursor text-gray-500">_</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Below terminal */}
+              <div className="grid grid-cols-3 gap-3 mt-3">
+                {[
+                  { val: '28K+', label: 'Pengguna' },
+                  { val: '98%', label: 'Sukses Rate' },
+                  { val: '<30s', label: 'Rata OTP' },
+                ].map((s, i) => (
+                  <div key={i} className="bg-white/[0.03] backdrop-blur-xl border border-white/[0.07] rounded-2xl py-4 text-center hover:bg-white/[0.06] transition-all">
+                    <p className="text-white font-black text-lg">{s.val}</p>
+                    <p className="text-gray-600 text-[10px] font-bold uppercase tracking-widest">{s.label}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Stats row */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-16">
+            {[
+              {v:'28K+', l:'Pengguna aktif'},
+              {v:'1300+', l:'Produk tersedia'},
+              {v:'170+', l:'Negara'},
+              {v:'Rp 1.900', l:'Harga mulai dari'},
+            ].map((s,i) => (
+              <div key={i} className="bg-white/[0.03] backdrop-blur-xl border border-white/[0.07] rounded-2xl p-5 hover:bg-white/[0.06] transition-all">
+                <div className="text-3xl font-black text-white tracking-tight mb-1">{s.v}</div>
+                <div className="text-[10px] text-gray-600 font-bold uppercase tracking-widest">{s.l}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {/* ═══ MARQUEE ════════════════════════════════════════════════ */}
+      <div className="border-y border-white/[0.06] py-4 overflow-hidden bg-white/[0.01] backdrop-blur-sm">
+        <div className="mq flex gap-10 whitespace-nowrap">
+          {['WhatsApp','Telegram','TikTok','Instagram','Shopee','Gojek','OVO','Dana','LINE','Discord','Twitter/X','Binance','Tokopedia','Netflix','Grab','Steam','Roblox','Airbnb',
+            'WhatsApp','Telegram','TikTok','Instagram','Shopee','Gojek','OVO','Dana','LINE','Discord','Twitter/X','Binance','Tokopedia','Netflix','Grab','Steam','Roblox','Airbnb'].map((s,i) => (
+            <span key={i} className="text-[10px] font-black text-gray-600 uppercase tracking-[0.3em] inline-flex items-center gap-6">
+              {s} <span className="w-1 h-1 bg-red-600/40 rounded-full" />
+            </span>
+          ))}
+        </div>
+      </div>
+
+      {/* ═══ HOW IT WORKS ════════════════════════════════════════════ */}
+      <section className="py-20 md:py-32 relative overflow-hidden">
+        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[300px] bg-red-900/[0.08] blur-[150px] rounded-full pointer-events-none" />
+        <div className="max-w-7xl mx-auto px-6 relative z-10">
+          <p className="text-[10px] text-red-500 font-black uppercase tracking-[0.4em] mb-16 flex items-center gap-3">
+            <span className="w-6 h-px bg-red-500 inline-block" /> Cara Kerja
+          </p>
+          <div className="grid md:grid-cols-3 gap-4">
+            {[
+              {n:'01', emoji:'', title:'Isi Saldo', copy:'Top up via QRIS, transfer bank, atau e-wallet. Saldo masuk dalam hitungan menit.'},
+              {n:'02', emoji:'', title:'Pilih & Beli', copy:'Pilih aplikasi dan negara yang kamu butuhkan. 1300+ produk tersedia dengan stok live.'},
+              {n:'03', emoji:'', title:'Terima OTP', copy:'Kode masuk ke dashboard kamu dalam detik. Kalau tidak masuk? Saldo balik 100% otomatis.'},
+            ].map((s,i) => (
+              <div key={i} className="bg-white/[0.03] backdrop-blur-xl border border-white/[0.07] hover:border-red-500/20 hover:bg-white/[0.05] rounded-3xl p-8 transition-all duration-300 group cursor-default">
+                <div className="flex items-start justify-between mb-8">
+                  <span className="text-[72px] leading-none font-black text-white/25 group-hover:text-white/40 transition-colors select-none tabular-nums">{s.n}</span>
+                  
+                </div>
+                <h3 className="text-xl font-black text-white uppercase tracking-tight mb-3">{s.title}</h3>
+                <p className="text-gray-500 text-sm leading-relaxed">{s.copy}</p>
+                <div className="mt-8 w-5 h-px bg-red-500/30 group-hover:w-10 group-hover:bg-red-500 transition-all duration-500" />
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {/* ═══ FEATURE LIST ════════════════════════════════════════════ */}
+      <section className="py-20 md:py-32 relative overflow-hidden">
+        <div className="max-w-7xl mx-auto px-6">
+          <div className="grid md:grid-cols-2 gap-16 lg:gap-24 items-start">
+            <div>
+              <p className="text-[10px] text-red-500 font-black uppercase tracking-[0.4em] mb-8 flex items-center gap-3">
+                <span className="w-6 h-px bg-red-500 inline-block" /> Kenapa Pusatnokos
+              </p>
+              <h2 className="text-5xl md:text-6xl font-black text-white uppercase tracking-tighter leading-[0.85] mb-8">
+                Beda dari<br/>yang lain.
+              </h2>
+              <p className="text-gray-500 text-sm leading-relaxed mb-8 max-w-xs">
+                Bukan sekadar reseller. Kami punya sistem sendiri, harga transparan, dan auto-refund yang benar-benar jalan.
+              </p>
+              <button onClick={() => navigate('register')} className="inline-flex items-center gap-2 text-red-400 hover:text-red-300 font-black text-xs uppercase tracking-widest border border-red-500/20 hover:border-red-500/50 px-5 py-2.5 rounded-full transition-all">
+                Coba gratis <ArrowRight className="w-3.5 h-3.5" />
+              </button>
+            </div>
+
+            <div className="divide-y divide-white/5">
+              {[
+                { icon:'01', title:'OTP dalam 30 detik', desc:'Rata-rata OTP masuk dalam 4–30 detik. Bukan menit — detik.', accent:'text-yellow-400' },
+                { icon:'02', title:'Auto-Refund, beneran', desc:'Bukan janji. Sistemnya otomatis — kalau OTP tidak masuk, saldo balik sendiri. Tidak perlu minta.', accent:'text-green-400' },
+                { icon:'03', title:'170+ negara, 90+ layanan', desc:'WhatsApp, Telegram, TikTok, Shopee, Gojek, dan banyak lagi — dari Indonesia sampai Eropa.', accent:'text-cyan-400' },
+                { icon:'04', title:'Data kamu aman', desc:'Tidak dijual, tidak dibagikan. Enkripsi end-to-end di setiap transaksi.', accent:'text-purple-400' },
+              ].map((f,i) => (
+                <div key={i} className="bg-white/[0.03] backdrop-blur-xl border border-white/[0.06] hover:border-red-500/15 hover:bg-white/[0.05] rounded-2xl p-5 flex gap-4 group transition-all duration-300">
+                  <span className="w-7 h-7 rounded-lg bg-red-600/20 border border-red-500/30 flex items-center justify-center text-red-400 text-[10px] font-black shrink-0">{f.icon}</span>
+                  <div>
+                    <h3 className={`font-black ${f.accent} text-sm uppercase tracking-wide mb-1.5`}>{f.title}</h3>
+                    <p className="text-gray-500 text-sm leading-relaxed">{f.desc}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* ═══ CATALOG ══════════════════════════════════════════════════ */}
+      <section className="py-20 md:py-32 relative overflow-hidden" id="harga">
+        <div className="max-w-7xl mx-auto px-6">
+          <div className="flex flex-col md:flex-row md:items-end justify-between gap-8 mb-12">
+            <div>
+              <p className="text-[10px] text-red-500 font-black uppercase tracking-[0.4em] mb-6 flex items-center gap-3">
+                <span className="w-6 h-px bg-red-500 inline-block" /> Harga Live
+              </p>
+              <h2 className="text-4xl md:text-5xl font-black text-white uppercase tracking-tighter leading-[0.85]">
+                Update tiap saat.<br/><span className="bg-gradient-to-r from-red-500 to-orange-400 bg-clip-text text-transparent">Transparan.</span>
+              </h2>
+            </div>
+            <div className="relative w-full max-w-[220px] z-20">
+              <button onClick={() => setCountryDropdownOpen(!countryDropdownOpen)} className="w-full bg-white/[0.04] backdrop-blur-xl border border-white/[0.08] hover:bg-white/[0.07] rounded-2xl py-2.5 px-4 flex items-center gap-2.5 text-sm transition-all">
+                <span className="text-base">{COUNTRIES.find(c => c.id === selectedCountry)?.flag}</span>
+                <span className="text-white font-bold text-xs">{COUNTRIES.find(c => c.id === selectedCountry)?.name}</span>
+                <ChevronDown className={`w-3.5 h-3.5 text-gray-600 ml-auto transition-transform ${countryDropdownOpen?'rotate-180':''}`} />
+              </button>
+              {countryDropdownOpen && (
+                <div className="absolute top-full left-0 w-52 mt-2 bg-[#0a0000]/95 backdrop-blur-xl border border-white/[0.08] rounded-2xl shadow-[0_20px_60px_rgba(0,0,0,0.9)] max-h-56 overflow-y-auto z-50">
+                  {COUNTRIES.map(c => (
+                    <button key={c.id} onClick={() => { setSelectedCountry(c.id); setCountryDropdownOpen(false); }} className={`w-full text-left px-4 py-2.5 flex items-center gap-2.5 text-xs font-bold border-b border-white/5 last:border-0 transition-colors ${selectedCountry===c.id?'text-red-400 bg-red-600/10':'text-gray-400 hover:text-white hover:bg-white/3'}`}>
+                      <span className="text-base">{c.flag}</span>{c.name}
                     </button>
                   ))}
                 </div>
               )}
             </div>
           </div>
-          
-          <div className="relative">
-            <div className="flex items-center gap-2 overflow-x-auto pb-2 scrollbar-hide pt-2 border-t border-white/5 scroll-smooth snap-x snap-mandatory" style={{WebkitOverflowScrolling:'touch'}}>
-              {CATEGORIES.map(cat => (
-                <button 
-                  key={cat.id}
-                  onClick={() => setSelectedCategory(cat.id)}
-                  className={`flex-shrink-0 snap-start px-4 py-2 rounded-full text-xs font-bold uppercase tracking-widest transition-all ${
-                    selectedCategory === cat.id 
-                    ? 'bg-red-500/20 text-red-400 border border-red-500/50' 
-                    : 'bg-black text-gray-500 border border-white/10 hover:border-white/20 hover:text-gray-300'
-                  }`}
-                >
-                  {cat.label}
-                </button>
-              ))}
+
+          {isFetchingStock ? (
+            <div className="flex items-center gap-3 py-20">
+              <Loader2 className="w-4 h-4 text-red-500 animate-spin" />
+              <span className="text-gray-600 text-xs font-bold uppercase tracking-widest">Memuat harga live...</span>
             </div>
-            {/* fade right edge — hints there's more to scroll */}
-            <div className="pointer-events-none absolute right-0 top-0 bottom-0 w-10 bg-gradient-to-l from-[#040101] to-transparent" />
+          ) : (
+            <div className="bg-white/[0.02] backdrop-blur-xl border border-white/[0.07] rounded-3xl overflow-hidden divide-y divide-white/[0.06]">
+              {publicInventory.map(item => {
+                const svc = getServiceMeta(item.serviceId) || { name: item.serviceId, icon: '📱', color: 'bg-gray-800' };
+                const live = liveStocks[item.serviceId];
+                const out = !live || live.count === 0;
+                const price = (live && live.minPrice > 0) ? live.minPrice : getRealPrice(item.countryId, item.serviceId, 'cheap');
+                const hot = item.isTrending ?? getIsTrending(item.countryId, item.serviceId);
+                return (
+                  <div key={item.id} className={`flex items-center justify-between py-4 px-5 group ${out?'opacity-40':'hover:bg-white/[0.04] cursor-pointer transition-all'}`}
+                    onClick={() => !out && navigate('register')}>
+                    <div className="flex items-center gap-4">
+                      <ServiceIcon service={svc} className="w-9 h-9 text-sm" />
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-white font-black text-sm uppercase tracking-wide">{svc.name}</span>
+                          {hot && !out && <span className="text-[9px] text-red-400 font-black bg-red-500/10 px-1.5 py-0.5 rounded-full">HOT</span>}
+                          {out && <span className="text-[9px] text-gray-600 font-black">KOSONG</span>}
+                        </div>
+                        <div className="flex items-center gap-1.5 mt-0.5">
+                          <span className="text-xs text-gray-600">{COUNTRIES.find(c => c.id === item.countryId)?.flag}</span>
+                          <span className="text-[10px] text-gray-600">{COUNTRIES.find(c => c.id === item.countryId)?.name}</span>
+                        </div>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-6">
+                      <div className="text-right">
+                        <p className={`text-base font-black ${out?'text-gray-600 line-through':'text-white'}`}><FormatRupiah value={price}/></p>
+                        {!out && <p className="text-[10px] text-gray-600">per nomor</p>}
+                      </div>
+                      {!out && <ArrowRight className="w-4 h-4 text-gray-700 group-hover:text-red-400 transition-colors" />}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          <div className="pt-8 border-t border-white/5 flex justify-between items-center">
+            <span className="text-gray-700 text-xs font-bold uppercase tracking-widest">{publicInventory.length} dari 1300+ produk</span>
+            <button onClick={() => navigate('register')} className="text-red-400 hover:text-red-300 font-black text-xs uppercase tracking-widest inline-flex items-center gap-1.5 transition-colors">
+              Lihat semua <ArrowRight className="w-3.5 h-3.5" />
+            </button>
           </div>
         </div>
-      </div>
+      </section>
 
-      <div className="flex-1 flex flex-col min-h-0 pb-24 md:pb-4">
-        {/* Banner peringatan ketika API 5sim tidak bisa diakses */}
-        {stockApiError && !isFetchingStock && (
-          <div className="mb-4 flex items-start gap-3 bg-yellow-950/60 border border-yellow-500/40 text-yellow-300 px-5 py-4 rounded-2xl">
-            <AlertTriangle className="w-5 h-5 shrink-0 mt-0.5 text-yellow-400" />
-            <div>
-              <p className="font-bold text-sm">Data stok tidak tersedia untuk negara ini</p>
-              <p className="text-xs text-yellow-300/70 mt-1">Coba pilih negara lain seperti Indonesia, Rusia, atau India. Jika masalah berlanjut, hubungi Admin.</p>
-            </div>
+      {/* ═══ SOCIAL PROOF — chat style ═══════════════════════════════ */}
+      <section className="py-20 md:py-32 relative overflow-hidden">
+        <div className="max-w-7xl mx-auto px-6">
+          <p className="text-[10px] text-red-500 font-black uppercase tracking-[0.4em] mb-16 flex items-center gap-3">
+            <span className="w-6 h-px bg-red-500 inline-block" /> Kata Pengguna
+          </p>
+          <div className="grid md:grid-cols-3 gap-4">
+            {[
+              { name:'Rizky', role:'Freelancer', time:'kemarin', text:'udah 3 bulan pakai, ga pernah kecewa. OTP selalu cepet masuk, kalau gagal langsung auto-refund tanpa drama 🔥', rating:5 },
+              { name:'Sinta', role:'Reseller Online', time:'2 hari lalu', text:'harganya murah banget dibanding tempat lain. stok WA selalu ada. proses beli juga gampang, ga ribet', rating:5 },
+              { name:'Budi', role:'Developer', time:'seminggu lalu', text:'tool wajib buat semua project butuh verifikasi. dashboard simple, responsive, no bullshit', rating:5 },
+            ].map((t,i) => (
+              <div key={i} className="bg-white/[0.03] backdrop-blur-xl border border-white/[0.07] hover:border-red-500/20 hover:bg-white/[0.05] rounded-3xl p-6 transition-all duration-300 group">
+                <div className="flex items-center gap-3 mb-5">
+                  <div className="w-10 h-10 bg-gradient-to-br from-red-600 to-red-900 rounded-xl flex items-center justify-center text-white font-black text-sm shadow-[0_0_20px_rgba(220,38,38,0.3)]">{t.name[0]}</div>
+                  <div>
+                    <p className="text-white font-black text-sm">{t.name}</p>
+                    <p className="text-gray-600 text-[10px] uppercase tracking-widest">{t.role} · {t.time}</p>
+                  </div>
+                  <div className="ml-auto flex gap-0.5">
+                    {[1,2,3,4,5].map(s => <Star key={s} className="w-3 h-3 fill-yellow-400 text-yellow-400"/>)}
+                  </div>
+                </div>
+                <p className="text-gray-400 text-sm leading-relaxed">"{t.text}"</p>
+              </div>
+            ))}
           </div>
-        )}
-        {filteredInventory.length === 0 ? (
-          <div className="flex flex-col items-center justify-center py-20 text-center">
-            <div className="w-16 h-16 rounded-2xl bg-red-900/20 border border-red-900/30 flex items-center justify-center mb-5">
-              <Search className="w-7 h-7 text-red-800/60" />
+        </div>
+      </section>
+
+      {/* ═══ CTA ═══════════════════════════════════════════════════════ */}
+      <section className="py-20 md:py-32 relative overflow-hidden">
+        <div className="absolute inset-0 bg-gradient-to-br from-red-950/40 via-black to-black" />
+        <div className="absolute inset-0" style={{backgroundImage:'radial-gradient(rgba(220,38,38,0.06) 1px,transparent 1px)',backgroundSize:'32px 32px'}} />
+        <div className="absolute -top-20 left-1/2 -translate-x-1/2 w-[800px] h-[400px] bg-red-600/15 blur-[150px] rounded-full pointer-events-none" />
+        <div className="max-w-7xl mx-auto px-6 relative z-10">
+          <div className="bg-white/[0.03] backdrop-blur-xl border border-red-500/20 rounded-[2.5rem] p-10 md:p-16 shadow-[0_32px_80px_rgba(0,0,0,0.8),inset_0_1px_0_rgba(255,255,255,0.05)]">
+          <div className="flex flex-col md:flex-row md:items-end justify-between gap-10">
+            <div>
+              <div className="inline-flex items-center gap-2 bg-white/[0.06] border border-white/[0.1] px-3 py-1.5 rounded-full mb-6">
+                <span className="w-1.5 h-1.5 bg-green-400 rounded-full animate-pulse" />
+                <span className="text-gray-400 text-[10px] font-bold uppercase tracking-widest">Gratis daftar · bayar saat pakai</span>
+              </div>
+              <h2 className="text-6xl md:text-[90px] font-black text-white uppercase tracking-tighter leading-[0.82]">
+                Mulai<br/><span className="bg-gradient-to-r from-red-400 to-orange-400 bg-clip-text text-transparent">sekarang.</span>
+              </h2>
             </div>
-            <p className="text-lg font-bold text-gray-400 mb-1">
-              {search ? `Tidak ada hasil untuk "${search}"` : 'Layanan Tidak Tersedia'}
-            </p>
-            <p className="text-sm text-gray-600 mb-6 max-w-xs">
-              {search
-                ? 'Coba kata kunci lain seperti nama lengkap aplikasi (cth: "WhatsApp", "Google")'
-                : 'Stok sedang kosong untuk negara dan kategori ini'}
-            </p>
-            <div className="flex flex-wrap gap-2 justify-center">
-              {search && (
-                <button
-                  onClick={() => setSearch('')}
-                  className="px-4 py-2 bg-white/5 border border-white/10 rounded-xl text-sm text-gray-300 font-bold hover:bg-white/10 transition-colors"
-                >
-                  Hapus Pencarian
-                </button>
-              )}
-              <button
-                onClick={() => { setSelectedCategory('all'); setSearch(''); }}
-                className="px-4 py-2 bg-red-600/15 border border-red-500/30 rounded-xl text-sm text-red-400 font-bold hover:bg-red-600/25 transition-colors"
-              >
-                Lihat Semua Layanan
+            <div className="flex flex-col gap-3 md:items-end shrink-0">
+              <button onClick={() => navigate('register')} className="group inline-flex items-center gap-2.5 bg-red-600 hover:bg-red-500 text-white font-black text-base px-10 py-5 rounded-2xl uppercase tracking-widest transition-all shadow-[0_0_40px_rgba(220,38,38,0.4)] hover:shadow-[0_0_60px_rgba(220,38,38,0.6)]">
+                Daftar Gratis <ArrowRight className="w-5 h-5 group-hover:translate-x-1 transition-transform" />
+              </button>
+              <button onClick={() => navigate('login')} className="text-gray-500 hover:text-white text-sm font-bold transition-colors text-center">
+                Sudah punya akun? Masuk di sini
               </button>
             </div>
           </div>
-        ) : isFetchingStock ? (
-          <CatalogSkeleton count={12} />
-        ) : (
-          <VirtualCatalogGrid
-            items={filteredInventory}
-            liveStocks={liveStocks}
-            onBuyClick={handleBuyClick}
-            getServiceMetaFn={getServiceMeta}
-            getCountriesFn={() => availableCountries}
-            getRealPriceFn={getRealPrice}
-          />
-        )}
-      </div>
+          </div>
+        </div>
+      </section>
 
-      {showModal && itemToBuy && typeof document !== 'undefined' && createPortal(
-        <div
-          className="fixed inset-0 z-[999] flex items-end md:items-center justify-center px-0 md:px-4 bg-black/90 backdrop-blur-md animate-in fade-in duration-200"
-          onClick={() => { setShowModal(false); setSwipeDelta(0); }}
-        >
-          <div
-            className="bg-[#080101] border border-red-800/40 rounded-t-3xl md:rounded-2xl w-full md:max-w-md shadow-[0_0_60px_rgba(220,38,38,0.15)] relative flex flex-col animate-in slide-in-from-bottom-4 duration-250"
-            style={{
-              maxHeight: 'calc(100dvh - env(safe-area-inset-top, 0px) - 72px)',
-              transform: swipeDelta > 0 ? `translateY(${swipeDelta}px)` : undefined,
-              transition: swipeDelta === 0 ? 'transform 0.3s ease' : 'none',
-              opacity: swipeDelta > 0 ? Math.max(0.4, 1 - swipeDelta / 300) : 1,
-            }}
-            onClick={e => e.stopPropagation()}
-            onTouchStart={e => {
-              swipeTouchStartY.current = e.touches[0].clientY;
-            }}
-            onTouchMove={e => {
-              const scrollEl = swipeScrollRef.current;
-              const atTop = !scrollEl || scrollEl.scrollTop === 0;
-              const delta = e.touches[0].clientY - swipeTouchStartY.current;
-              if (delta > 0 && atTop) setSwipeDelta(delta);
-            }}
-            onTouchEnd={() => {
-              if (swipeDelta > 110) {
-                setShowModal(false);
-              }
-              setSwipeDelta(0);
-            }}
-          >
-            {/* Drag handle – mobile only */}
-            <div className="md:hidden flex justify-center pt-3 pb-1 shrink-0">
-              <div className="w-10 h-1 rounded-full bg-white/20" />
+      {/* ═══ FAQ ═══════════════════════════════════════════════════════ */}
+      <section className="py-20 md:py-32 relative" id="faq">
+        <div className="max-w-7xl mx-auto px-6">
+          <div className="grid md:grid-cols-[280px,1fr] gap-16">
+            <div>
+              <p className="text-[10px] text-red-500 font-black uppercase tracking-[0.4em] mb-6 flex items-center gap-3">
+                <span className="w-6 h-px bg-red-500 inline-block" /> FAQ
+              </p>
+              <h2 className="text-4xl font-black text-white uppercase tracking-tighter leading-[0.85] mb-6">Yang sering ditanyain.</h2>
+              <div className="border-l-2 border-white/5 pl-4">
+                <p className="text-gray-600 text-xs leading-relaxed">
+                  <span className="text-red-400/70">Disclaimer:</span> PusatNokos hanya menyediakan nomor virtual untuk keperluan verifikasi. Penyalahgunaan adalah tanggung jawab pengguna.
+                </p>
+              </div>
             </div>
-            {/* Top accent line */}
-            <div className="h-0.5 w-full bg-gradient-to-r from-transparent via-red-600 to-transparent opacity-60 shrink-0" />
-
-            {/* Scrollable content — button NOT inside here */}
-            <div ref={swipeScrollRef} className="overflow-y-auto overscroll-contain flex-1 min-h-0">
-              <div className="p-5 md:p-8 pb-3">
-              {/* Header */}
-              <div className="flex justify-between items-center mb-5">
-                <div>
-                  <p className="text-[10px] text-red-400/60 uppercase tracking-widest font-bold mb-0.5">Konfirmasi Pembelian</p>
-                  <h3 className="text-xl font-black text-white">Pilih Paket Server</h3>
-                </div>
-                <button
-                  onClick={() => setShowModal(false)}
-                  className="w-10 h-10 bg-white/5 active:bg-white/15 rounded-xl flex items-center justify-center transition-colors border border-white/[0.06]"
-                >
-                  <X className="w-5 h-5 text-gray-400" />
-                </button>
-              </div>
-
-              {/* Service + Country summary */}
-              <div className="flex items-center gap-4 bg-white/[0.03] border border-white/[0.06] rounded-xl p-4 mb-6">
-                <ServiceIcon
-                  service={getSAServiceMeta(itemToBuy.serviceId, liveStocks[itemToBuy.serviceId]?.saName)}
-                  className="w-10 h-10 shrink-0"
-                />
-                <div className="flex-1 min-w-0">
-                  <p className="font-bold text-white text-sm truncate">
-                    {(() => {
-                      const saName = liveStocks[itemToBuy.serviceId]?.saName;
-                      const mappedName = getServiceMeta(itemToBuy.serviceId)?.name;
-                      const isRaw = !saName || saName.toLowerCase() === itemToBuy.serviceId.toLowerCase();
-                      return isRaw ? (mappedName || itemToBuy.serviceId) : saName;
-                    })()}
-                  </p>
-                  <p className="text-xs text-gray-500 flex items-center gap-1.5 mt-0.5">
-                    <span>{COUNTRIES.find(c => c.id === itemToBuy.countryId)?.flag}</span>
-                    <span>{COUNTRIES.find(c => c.id === itemToBuy.countryId)?.name}</span>
-                  </p>
-                </div>
-                <div className="text-right shrink-0">
-                  <p className="text-[9px] text-gray-600 uppercase tracking-widest font-bold">Saldo kamu</p>
-                  <p className="text-sm font-black text-white"><FormatRupiah value={balance} /></p>
-                </div>
-              </div>
-
-              {/* Tier selection */}
-              <div className="space-y-2 mb-5">
-                <div className="flex items-center justify-between mb-3">
-                  <p className="text-xs font-bold text-gray-400 uppercase tracking-widest">Pilih Server</p>
-                  <div className="flex gap-4 text-[9px] text-gray-600 font-bold uppercase tracking-widest">
-                    <span>Sukses</span>
-                    <span>Harga</span>
+            <div className="space-y-3">
+              {FAQS.map((faq,i) => (
+                <div key={i} className={`bg-white/[0.03] backdrop-blur-xl border border-white/[0.07] hover:border-red-500/20 rounded-2xl overflow-hidden cursor-pointer transition-all duration-300 ${openFaq===i?'border-red-500/20 bg-white/[0.05]':''}`} onClick={() => setOpenFaq(openFaq===i?null:i)}>
+                  <div className="flex items-center gap-4 p-5">
+                    <span className="w-6 h-6 rounded-md bg-red-600/15 border border-red-500/20 flex items-center justify-center text-red-400 text-[9px] font-black shrink-0">{faq.icon}</span>
+                    <h4 className="text-sm font-bold text-white flex-1">{faq.q}</h4>
+                    <span className={`text-gray-500 font-black text-lg shrink-0 transition-transform duration-300 ${openFaq===i?'rotate-45 text-red-400':''}`}>+</span>
                   </div>
-                </div>
-
-                {currentTiers && Object.keys(currentTiers).length > 0 ? (
-                  Object.values(currentTiers).map((tier: any) => {
-                    const isSelected = selectedTier === tier.id;
-                    return (
-                      <div
-                        key={tier.id}
-                        onClick={() => setSelectedTier(tier.id)}
-                        className={`relative rounded-xl border cursor-pointer transition-all duration-150 ${
-                          isSelected
-                            ? 'border-red-500/60 bg-red-500/[0.08] shadow-[0_0_20px_rgba(220,38,38,0.12)]'
-                            : 'border-white/[0.07] bg-white/[0.02] hover:border-white/20 hover:bg-white/[0.04]'
-                        }`}
-                      >
-                        {tier.recommended && (
-                          <div className="absolute -top-2.5 left-4">
-                            <span className="text-[9px] font-black bg-green-600 text-white px-2.5 py-0.5 rounded-full uppercase tracking-widest shadow-[0_2px_8px_rgba(34,197,94,0.35)]">
-                              Rekomendasi
-                            </span>
-                          </div>
-                        )}
-                        <div className="flex items-center gap-3 px-4 py-4 md:py-3.5">
-                          {/* Radio */}
-                          <div className={`w-4 h-4 rounded-full border-2 flex items-center justify-center shrink-0 transition-all ${isSelected ? 'border-red-500' : 'border-gray-600'}`}>
-                            {isSelected && <div className="w-2 h-2 bg-red-500 rounded-full" />}
-                          </div>
-                          {/* Info */}
-                          <div className="flex-1 min-w-0">
-                            <p className={`text-sm font-bold leading-tight ${isSelected ? 'text-white' : 'text-gray-300'}`}>{tier.name}</p>
-                            <p className="text-[10px] text-gray-500 mt-0.5">{tier.desc}</p>
-                          </div>
-                          {/* Success rate */}
-                          <div className="text-right shrink-0 mr-3">
-                            <p className={`text-xs font-black ${
-                              parseInt(tier.success) >= 95 ? 'text-green-400'
-                              : parseInt(tier.success) >= 85 ? 'text-amber-400'
-                              : 'text-gray-400'
-                            }`}>{tier.success}</p>
-                          </div>
-                          {/* Price */}
-                          <div className="text-right shrink-0 min-w-[68px]">
-                            <p className={`text-sm font-black ${isSelected ? 'text-red-400' : 'text-gray-300'}`}>
-                              <FormatRupiah value={tier.price} />
-                            </p>
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })
-                ) : (
-                  <div className="p-5 text-center border border-red-500/20 rounded-xl bg-red-500/5">
-                    <AlertCircle className="w-8 h-8 text-red-500/50 mx-auto mb-2" />
-                    <p className="text-sm text-red-400 font-bold">Data server tidak tersedia</p>
-                    <p className="text-xs text-gray-500 mt-1">Coba pilih negara lain</p>
-                  </div>
-                )}
-
-                {currentTiers && Object.keys(currentTiers).length === 1 && currentTiers.cheap && (
-                  <p className="text-xs text-amber-500/80 bg-amber-500/[0.08] border border-amber-500/20 rounded-lg px-3 py-2 flex items-start gap-2">
-                    <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0 text-amber-500" />
-                    Hanya server random tersedia. Tingkat sukses lebih rendah dari biasanya.
-                  </p>
-                )}
-              </div>
-
-              {/* Total + saldo warning */}
-              {currentTiers && currentTiers[selectedTier] && (
-                <>
-                  <div className="flex items-center justify-between bg-red-950/30 border border-red-800/30 rounded-xl px-5 py-4 mb-3">
-                    <span className="text-sm font-bold text-gray-400">Total Tagihan</span>
-                    <span className="text-2xl font-black text-white"><FormatRupiah value={currentTiers[selectedTier].price} /></span>
-                  </div>
-                  {balance < currentTiers[selectedTier].price && (
-                    <div className="flex items-start gap-3 bg-amber-950/40 border border-amber-600/30 rounded-xl px-4 py-3">
-                      <AlertTriangle className="w-4 h-4 text-amber-400 mt-0.5 shrink-0" />
-                      <div>
-                        <p className="text-xs font-bold text-amber-300">Saldo tidak cukup</p>
-                        <p className="text-[11px] text-amber-400/70 mt-0.5">
-                          Kurang <span className="font-black text-amber-300"><FormatRupiah value={currentTiers[selectedTier].price - balance} /></span>. Isi saldo dulu?
-                        </p>
-                      </div>
+                  {openFaq===i && (
+                    <div className="pb-5 px-5 pl-14">
+                      <p className="text-gray-400 text-sm leading-relaxed">{faq.a}</p>
                     </div>
                   )}
-                </>
-              )}
-              </div>
-            </div>{/* end scrollable */}
-
-            {/* ✅ STICKY BUTTON — always visible, never behind bottom nav */}
-            <div className="shrink-0 px-5 pt-3 pb-4 border-t border-white/[0.06] bg-[#080101]" style={{ paddingBottom: 'calc(env(safe-area-inset-bottom, 0px) + 16px)' }}>
-              <Button
-                variant="primary"
-                className="w-full py-4 text-base tracking-wide shadow-[0_8px_25px_rgba(220,38,38,0.35)] flex items-center justify-center gap-2 active:scale-[0.98] transition-transform"
-                onClick={confirmPurchase}
-                disabled={isProcessing || !currentTiers || !currentTiers[selectedTier]}
-              >
-                {isProcessing
-                  ? <><Loader2 className="animate-spin w-4 h-4" /> Memproses...</>
-                  : <><ShoppingCart className="w-4 h-4" /> Beli Sekarang</>
-                }
-              </Button>
+                </div>
+              ))}
             </div>
           </div>
-        </div>,
-        document.body
-      )}
+        </div>
+      </section>
+
+      {legalModal.open && <LegalModal initialTab={legalModal.tab} onClose={() => setLegalModal({open:false,tab:'terms-id'})} />}
     </div>
   );
 }
-);

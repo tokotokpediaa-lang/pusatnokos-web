@@ -11,7 +11,7 @@ import {
 } from 'lucide-react';
 import { initializeApp, getApps, getApp } from 'firebase/app';
 import { getAuth, updateProfile, updatePassword } from 'firebase/auth';
-import { getFirestore } from 'firebase/firestore';
+import { getFirestore, collection, onSnapshot, doc, updateDoc, query, limit } from 'firebase/firestore';
 import { secureApiCall } from '@/lib/apiClient';
 import { Button, Card, THEME } from './ui';
 
@@ -63,7 +63,7 @@ const Shimmer: React.FC<{ className?: string; style?: React.CSSProperties }> = (
 );
 
 const ShimmerStyle: React.FC = () => (
-  <style>{`@keyframes shimmer { 100% { transform: translateX(100%); } }`}</style>
+  <style suppressHydrationWarning>{`@keyframes shimmer { 100% { transform: translateX(100%); } }`}</style>
 );
 
 const CatalogSkeleton: React.FC<{ count?: number }> = ({ count = 12 }) => (
@@ -434,6 +434,459 @@ function MutasiPageInner({ transactions, isLoadingTransactions = false }) {
 // =========================================================
 
 export const MutasiPage = MutasiPageInner;
+
+// ── ActiveOrderItem (dipindah dari OrderHistoryPage) ────────────────────────
+function ActiveOrderItem({ order, compact = false, showToast }) {
+  // ✅ State utama — sinkron dari Firestore (order prop), bukan override mandiri
+  const [otpData, setOtpData] = useState<{
+    status: string;
+    otp: string | null;
+    allSms?: any[];
+  }>({
+    status: order.status || 'active',
+    otp: order.otp || null,
+  });
+
+  const [isCanceling, setIsCanceling] = useState(false);
+  const esRef           = useRef<EventSource | null>(null);
+  const pollIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  // Refs agar callback async tidak stale
+  const statusRef = useRef(otpData.status);
+  const otpRef    = useRef<string | null>(otpData.otp);
+
+  useEffect(() => { statusRef.current = otpData.status; }, [otpData.status]);
+  useEffect(() => { otpRef.current    = otpData.otp;    }, [otpData.otp]);
+
+  // ✅ Sync saat order prop berubah dari Firestore real-time
+  useEffect(() => {
+    setOtpData(prev => {
+      const newStatus = order.status || prev.status;
+      const newOtp    = order.otp || prev.otp;
+      // Jangan override status final — 'success' dan 'canceled' tidak boleh
+      // ditimpa balik ke 'active' jika Firestore belum sync sempurna
+      if (prev.status === 'success' && newStatus === 'active') return prev;
+      if (prev.status === 'canceled' || prev.status === 'CANCELLED') return prev;
+      return { ...prev, status: newStatus, otp: newOtp };
+    });
+  }, [order.status, order.otp]);
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // Strategi dual-track:
+  //  1. POLLING  — setInterval setiap 3 detik via ?mode=poll (reliable di semua platform)
+  //  2. SSE      — EventSource sebagai bonus kecepatan (jika platform support)
+  // Polling SELALU jalan dari awal. SSE hanya pelengkap.
+  // ──────────────────────────────────────────────────────────────────────────
+  useEffect(() => {
+    // ✅ FIX BUG POLLING: Sertakan 'pending' agar order yang baru dibeli
+    // (status awal dari backend bisa 'pending') tetap di-poll sampai OTP masuk.
+    if (otpData.status !== 'active' && otpData.status !== 'pending') {
+      if (esRef.current)           { esRef.current.close(); esRef.current = null; }
+      if (pollIntervalRef.current) { clearInterval(pollIntervalRef.current); pollIntervalRef.current = null; }
+      return;
+    }
+
+    let isMounted = true;
+
+    // ── Helper: proses data dari poll atau SSE ────────────────────────────
+    const handleData = (data: any) => {
+      if (!isMounted || !data) return;
+
+      // ✅ FIX BUG STATUS: Normalisasi status mentah dari provider sebelum disimpan.
+      // 5SIM mengembalikan 'RECEIVED', SA mengembalikan 'STATUS_OK' — keduanya = sukses.
+      // Tanpa normalisasi ini polling tidak pernah berhenti dan status tidak ter-update.
+      const normalizeStatus = (s: string) => {
+        if (s === 'RECEIVED' || s === 'STATUS_OK')    return 'success';
+        if (s === 'TIMEOUT'  || s === 'STATUS_CANCEL') return 'canceled';
+        if (s === 'BANNED')                            return 'canceled';
+        return s;
+      };
+
+      const incomingStatus = normalizeStatus(data.status || 'active');
+
+      if (data.otp && data.otp !== otpRef.current) {
+        showToast(
+          `OTP diterima untuk ${order.saName || order.serviceId?.toUpperCase()}: ${data.otp}`,
+          'success'
+        );
+      }
+
+      setOtpData(prev => ({
+        status: incomingStatus === 'active' && prev.status === 'success'
+          ? 'success'
+          : incomingStatus,
+        otp:    data.otp || prev.otp || null,
+        allSms: data.allSms || prev.allSms || [],
+      }));
+
+      if (incomingStatus === 'success' || incomingStatus === 'canceled' || incomingStatus === 'CANCELLED' || incomingStatus === 'finished') {
+        if (esRef.current)           { esRef.current.close(); esRef.current = null; }
+        if (pollIntervalRef.current) { clearInterval(pollIntervalRef.current); pollIntervalRef.current = null; }
+      }
+    };
+
+    // ── TRACK 1: Polling via HTTP (selalu aktif, backbone utama) ──────────
+
+    const runPoll = async () => {
+      if (!isMounted || (statusRef.current !== 'active' && statusRef.current !== 'pending')) return;
+      if (!auth || !auth.currentUser) return;
+      try {
+        const token    = await auth.currentUser.getIdToken();
+        // ✅ SECURITY FIX: Token dipindah dari URL query string ke Authorization header.
+        // Token di URL bocor ke server access log, CDN log, dan browser history.
+        const endpoint = order.provider === 'smsactivate'
+          ? `/api/smsactivate/otp-stream?orderId=${order.id}&mode=poll`
+          : `/api/otp-stream?orderId=${order.id}&mode=poll`;
+        const res   = await fetch(
+          endpoint,
+          {
+            signal: AbortSignal.timeout(12000),
+            headers: { 'Authorization': `Bearer ${token}` },
+          }
+        );
+        // ✅ FIX: Jangan silent ignore — log error agar bisa debug di DevTools
+        if (!res.ok) {
+          console.error(
+            `[poll] Error ${res.status} untuk orderId=${order.id}.`,
+            'Cek Vercel Function Logs untuk detail.',
+          );
+          // Jika 401 (token expired) — refresh token di poll berikutnya, jangan stop
+          return;
+        }
+        const data = await res.json();
+        // Uncomment baris di bawah saat debug, comment kembali di production:
+        // console.log(`[poll] Response orderId=${order.id}:`, data);
+        handleData(data);
+      } catch (err: any) {
+        // Hanya log jika bukan AbortError (timeout normal)
+        if (err?.name !== 'AbortError') {
+          console.warn(`[poll] Network error orderId=${order.id}:`, err?.message);
+        }
+      }
+    };
+
+    // Jalankan sekali langsung, lalu setiap 3 detik
+    runPoll();
+    pollIntervalRef.current = setInterval(runPoll, 3000);
+
+    // ── TRACK 2: SSE (bonus kecepatan — tidak wajib berhasil) ─────────────
+    const openSSE = async () => {
+      if (!isMounted || !auth || !auth.currentUser) return;
+      try {
+        const token = await auth.currentUser.getIdToken();
+        if (!isMounted) return;
+
+        // ✅ FIX BUG SSE: Gunakan endpoint yang sesuai provider (bukan selalu 5sim)
+        const sseEndpoint = order.provider === 'smsactivate'
+          ? `/api/smsactivate/otp-stream?orderId=${order.id}&token=${encodeURIComponent(token)}`
+          : `/api/otp-stream?orderId=${order.id}&token=${encodeURIComponent(token)}`;
+        const es = new EventSource(sseEndpoint);
+        esRef.current = es;
+
+        es.onmessage = (event) => {
+          try { handleData(JSON.parse(event.data)); } catch { /* abaikan parse error */ }
+        };
+
+        // SSE error/timeout — tutup saja, polling sudah handle sebagai backbone
+        es.onerror = () => {
+          es.close();
+          esRef.current = null;
+        };
+      } catch { /* SSE tidak tersedia — polling sudah cukup */ }
+    };
+
+    // SSE dimatikan di production — Vercel timeout 5 menit menyebabkan error.
+    // Polling via ?mode=poll sudah cukup dan reliable di semua platform.
+    // ⚠️ SECURITY NOTE: Jika SSE diaktifkan kembali, token di URL (baris openSSE) harus
+    // diganti ke header — EventSource tidak support custom header secara native,
+    // solusinya: pakai @microsoft/fetch-event-source atau kirim token via cookie HttpOnly.
+    // openSSE();
+
+    return () => {
+      isMounted = false;
+      if (esRef.current)           { esRef.current.close(); esRef.current = null; }
+      if (pollIntervalRef.current) { clearInterval(pollIntervalRef.current); pollIntervalRef.current = null; }
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [order.id, otpData.status]);
+
+  // ✅ FIX: onExpire sekarang update Firestore secara langsung agar order
+  // hilang dari Status Live segera setelah waktu habis, tanpa tunggu polling.
+  const onExpire = useCallback(async () => {
+    if (statusRef.current !== 'active' && statusRef.current !== 'pending') return; // sudah di-cancel/sukses
+    try {
+      if (!auth?.currentUser) return;
+      // Update status lokal dulu agar UI langsung responsif
+      const expiredStatus = order.provider === 'smsactivate' ? 'CANCELLED' : 'canceled';
+      setOtpData(prev => ({ ...prev, status: expiredStatus }));
+      statusRef.current = expiredStatus;
+      // Sync ke Firestore agar hilang dari activeOrders filter
+      await updateDoc(
+        doc(db, 'users', auth.currentUser.uid, 'orders', order.id),
+        { status: expiredStatus }
+      );
+    } catch {
+      // Jika Firestore gagal, UI sudah update — tidak perlu error toast
+    }
+  }, [order.id, order.provider]);
+
+  // ✅ FIX: Jika order tidak punya expiresAt (umum pada Server 2/smsactivate),
+  // gunakan timestamp order + 20 menit sebagai fallback standar SA.
+  // Normalisasi timestamp dulu karena bisa berupa number, Firestore Timestamp,
+  // atau plain object { seconds, nanoseconds } — ketiganya harus dikonversi ke ms.
+  const orderTimestampMs = (() => {
+    const t = order.timestamp;
+    if (!t) return 0;
+    if (typeof t === 'number') return t;
+    if (typeof t?.toMillis === 'function') return t.toMillis();
+    if (t?.seconds) return t.seconds * 1000;
+    return 0;
+  })();
+
+  const effectiveExpiresAt = order.expiresAt
+    ?? (orderTimestampMs ? orderTimestampMs + 20 * 60 * 1000 : null);
+
+  const { formatTime, seconds } = useCountdown(
+    effectiveExpiresAt,
+    otpData.status === 'active',
+    onExpire
+  );
+
+  const handleCancel = async () => {
+    if (isCanceling) return;
+    setIsCanceling(true);
+    try {
+      if (!auth || !auth.currentUser) throw new Error('Sesi tidak valid');
+      const token = await auth.currentUser.getIdToken();
+
+      if (order.provider === 'smsactivate') {
+        // SMS-Activate: cancel via set-status endpoint
+        // ✅ SECURITY FIX: Tambahkan pengecekan res.ok — sebelumnya error diabaikan diam-diam.
+        const saRes = await fetch('/api/smsactivate/set-status', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+          body: JSON.stringify({ orderId: order.id, status: 8 }),
+        });
+        if (!saRes.ok) {
+          const saData = await saRes.json().catch(() => ({}));
+          throw new Error(saData.message || `Gagal membatalkan pesanan (${saRes.status})`);
+        }
+      } else {
+        // 5sim: cancel via cancel-order endpoint
+        const res = await fetch('/api/cancel-order', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+          body: JSON.stringify({ orderId: order.id }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.message || 'Gagal membatalkan pesanan');
+      }
+
+      // ✅ FIX: Update Firestore langsung agar activeOrders filter di DashHome
+      // ikut berubah via real-time listener. Tanpa ini, order tetap muncul di
+      // "Status Live" karena Firestore masih menyimpan status 'active'.
+      // Error permission di-silent karena status lokal sudah diupdate via setOtpData.
+      if (db) {
+        try {
+          await updateDoc(
+            doc(db, 'users', auth.currentUser.uid, 'orders', order.id),
+            { status: order.provider === 'smsactivate' ? 'CANCELLED' : 'canceled' }
+          );
+        } catch (_) { /* silent — tidak ganggu user jika Firestore rules belum allow */ }
+      }
+
+      showToast('Pesanan dibatalkan. Saldo dikembalikan.', 'info');
+      setOtpData(prev => ({ ...prev, status: order.provider === 'smsactivate' ? 'CANCELLED' : 'canceled', otp: null }));
+    } catch (err: any) {
+      showToast(err.message || 'Gagal membatalkan.', 'error');
+    } finally {
+      setIsCanceling(false);
+    }
+  };
+
+  const displayStatus = otpData.status;
+  const displayOtp = otpData.otp;
+  const isActive = displayStatus === 'active';
+  const isSuccess = displayStatus === 'success' || displayStatus === 'finished';
+  const isCanceled = displayStatus === 'canceled' || displayStatus === 'CANCELLED';
+
+  // ✅ FIX: Gunakan getSAServiceMeta untuk Server 2 (smsactivate) agar logo tampil benar.
+  // Sebelumnya selalu pakai getServiceMeta() sehingga logo Server 2 tidak match.
+  const service = order.saName
+    ? getSAServiceMeta(order.serviceId, order.saName)
+    : getServiceMeta(order.serviceId);
+  const serviceName = order.saName || service?.name || order.serviceId?.toUpperCase();
+  const urgentTime = seconds <= 120 && seconds > 0 && isActive;
+
+  if (compact) {
+    // ✅ Sembunyikan order yang sudah dibatalkan dari Status Live
+    if (isCanceled) return null;
+    // ✅ FIX: Sembunyikan juga order yang timer-nya sudah habis (expired) tapi
+    // Firestore belum sync — tanpa ini order stuck 00:00 terus muncul.
+    if (isActive && seconds === 0 && effectiveExpiresAt && Date.now() > effectiveExpiresAt) return null;
+
+    return (
+      <Card className={`p-4 flex items-center justify-between gap-4 ${
+        isSuccess ? 'border-green-500/30 bg-green-500/5' :
+        urgentTime ? 'border-orange-500/30 bg-orange-500/5 animate-pulse' :
+        'border-red-500/20'
+      }`}>
+        <div className="flex items-center gap-3 min-w-0">
+          <ServiceIcon service={service} className="w-10 h-10 shrink-0" />
+          <div className="min-w-0">
+            <p className="font-black text-white uppercase text-sm truncate">{serviceName}</p>
+            <p className="text-xs text-gray-500 font-mono truncate">{order.number || order.phone}</p>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-3 shrink-0">
+          {isActive && (
+            <span className={`text-sm font-black font-mono ${urgentTime ? 'text-orange-400' : 'text-gray-400'}`}>
+              {formatTime()}
+            </span>
+          )}
+          {isSuccess && displayOtp && (
+            <span className="text-green-400 font-black text-lg font-mono tracking-widest">{displayOtp}</span>
+          )}
+          {isSuccess && !displayOtp && (
+            <span className="text-xs text-green-400 font-bold uppercase">Sukses</span>
+          )}
+          {isCanceled && (
+            <span className="text-xs text-red-400 font-bold uppercase">Dibatalkan</span>
+          )}
+          {isActive && (
+            <div className="flex items-center gap-1">
+              <span className="w-2 h-2 bg-green-500 rounded-full animate-ping"></span>
+              <span className="text-xs text-gray-500 font-bold">Menunggu OTP</span>
+            </div>
+          )}
+        </div>
+      </Card>
+    );
+  }
+
+  return (
+    <Card className={`overflow-hidden p-0 transition-all ${
+      isSuccess  ? 'border-green-500/30 bg-[#020f04]' :
+      isCanceled ? 'border-white/[0.05] opacity-60' :
+      urgentTime ? 'border-orange-500/40 bg-[#100600]' :
+      'border-red-900/25 bg-[#0a0202]'
+    }`}>
+      {/* Timer progress bar (aktif only) */}
+      {isActive && (
+        <div className={`relative h-1.5 w-full overflow-hidden ${urgentTime ? 'bg-orange-900/40' : 'bg-red-900/20'}`}>
+          <div
+            className={`absolute left-0 top-0 h-full transition-all duration-1000 ${urgentTime ? 'bg-orange-500' : 'bg-red-600/70'}`}
+            style={{ width: `${Math.max(0, Math.min(100, (seconds / 600) * 100))}%` }}
+          />
+        </div>
+      )}
+
+      <div className="p-5 md:p-6">
+        {/* Header row */}
+        <div className="flex items-start justify-between gap-3 mb-4">
+          <div className="flex items-center gap-3 min-w-0">
+            <ServiceIcon service={service} className="w-10 h-10 md:w-12 md:h-12 shrink-0" />
+            <div className="min-w-0">
+              <h3 className="text-base font-bold text-white truncate">{serviceName}</h3>
+              <p className="text-[10px] text-gray-500 font-bold uppercase tracking-widest mt-0.5 truncate">
+                {order.countryId?.toUpperCase()} · {order.operator?.toUpperCase()}
+              </p>
+            </div>
+          </div>
+
+          {isActive && (
+            <div className={`shrink-0 text-right ${urgentTime ? 'text-orange-400' : 'text-gray-400'}`}>
+              <p className="text-[9px] font-bold uppercase tracking-widest mb-0.5 opacity-70">Sisa Waktu</p>
+              <p className={`text-2xl font-black font-mono tabular-nums leading-none ${urgentTime ? 'text-orange-400' : 'text-white'}`}>
+                {formatTime()}
+              </p>
+              {urgentTime && <p className="text-[9px] text-orange-400/70 font-bold mt-0.5">Segera gunakan!</p>}
+            </div>
+          )}
+          {isSuccess && (
+            <div className="flex items-center gap-1.5 bg-green-500/15 border border-green-500/30 px-3 py-1.5 rounded-xl shrink-0">
+              <CheckCircle className="w-3.5 h-3.5 text-green-400" />
+              <span className="text-green-400 font-bold text-xs hidden sm:block">OTP Diterima</span>
+            </div>
+          )}
+          {isCanceled && (
+            <div className="flex items-center gap-1.5 bg-red-500/8 border border-red-500/15 px-3 py-1.5 rounded-xl shrink-0">
+              <XCircle className="w-3.5 h-3.5 text-red-400" />
+              <span className="text-red-400 font-bold text-xs hidden sm:block">Dibatalkan</span>
+            </div>
+          )}
+        </div>
+
+        {/* Nomor Virtual */}
+        <div className="bg-black/60 border border-white/[0.07] rounded-xl p-4 mb-3 flex items-center justify-between gap-3">
+          <div>
+            <p className="text-[9px] text-gray-600 font-bold uppercase tracking-widest mb-1">Nomor Virtual</p>
+            <p className="text-white font-black text-lg font-mono tracking-widest">{order.number || order.phone}</p>
+          </div>
+          <CopyButton value={order.number || order.phone || ''} showToast={showToast} size="sm" />
+        </div>
+
+        {/* OTP Display */}
+        {isSuccess && displayOtp && (
+          <div className="bg-green-950/40 border-2 border-green-500/40 rounded-xl p-5 mb-3 flex items-center justify-between gap-4 shadow-[0_0_30px_rgba(34,197,94,0.08)]">
+            <div>
+              <p className="text-[9px] text-green-400/60 font-bold uppercase tracking-widest mb-1">Kode OTP</p>
+              <p className="text-green-400 font-black text-3xl font-mono tracking-[0.2em]">{displayOtp}</p>
+            </div>
+            <CopyButton value={displayOtp} showToast={showToast} size="md" className="bg-green-500/15 border-green-500/30 text-green-400 hover:bg-green-500/30" />
+          </div>
+        )}
+
+        {/* Semua SMS */}
+        {isSuccess && otpData.allSms && otpData.allSms.length > 1 && (
+          <div className="space-y-2 mb-3">
+            <p className="text-[10px] text-gray-500 font-bold uppercase tracking-widest">Semua SMS Masuk</p>
+            {otpData.allSms.map((sms, i) => (
+              <div key={i} className="bg-white/[0.03] border border-white/[0.06] rounded-lg p-3 text-sm text-gray-300 font-mono">
+                {sms.text || sms.code || '-'}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Waiting state */}
+        {isActive && (
+          <div className="bg-white/[0.02] border border-white/[0.05] rounded-xl p-3.5 mb-4 flex items-center gap-3">
+            <div className="relative shrink-0">
+              <div className="w-2 h-2 bg-green-500 rounded-full" />
+              <div className="absolute inset-0 w-2 h-2 bg-green-500 rounded-full animate-ping" />
+            </div>
+            <div>
+              <p className="text-white font-bold text-sm">Menunggu SMS OTP...</p>
+              <p className="text-gray-500 text-xs mt-0.5">Masukkan nomor di atas ke layanan {service?.name} untuk menerima SMS</p>
+            </div>
+          </div>
+        )}
+
+        {/* Action buttons — dibedakan secara visual */}
+        {isActive && (
+          <div className="flex gap-3">
+            {/* Salin Nomor — secondary, full width */}
+            <button
+              onClick={() => copyToClipboardHelper(order.number || order.phone || '', showToast)}
+              className="flex-1 py-3 rounded-xl border border-white/10 text-gray-400 hover:text-white hover:border-white/20 hover:bg-white/5 transition-all font-bold text-sm flex items-center justify-center gap-2"
+            >
+              <Copy className="w-4 h-4" /> Salin Nomor
+            </button>
+            {/* Batalkan — danger outline, hanya ikon + label pendek */}
+            <button
+              onClick={handleCancel}
+              disabled={isCanceling}
+              className="px-4 py-3 rounded-xl border border-red-900/40 text-red-500/70 hover:text-red-400 hover:border-red-500/40 hover:bg-red-950/30 transition-all font-bold text-sm flex items-center justify-center gap-1.5 disabled:opacity-40"
+            >
+              {isCanceling ? <Loader2 className="w-4 h-4 animate-spin" /> : <><XCircle className="w-4 h-4" /> Batal</>}
+            </button>
+          </div>
+        )}
+      </div>
+    </Card>
+  );
+}
 export default function DashHome({ user, navigate, orders, isLoadingOrders = false, balance, inventory, showToast, transactions = [], maintenance = null }) {
   // Guard: tunggu sebentar setelah navigate agar orders tidak flicker tampil order lama
   const [isStable, setIsStable] = React.useState(false);
@@ -586,7 +1039,6 @@ export default function DashHome({ user, navigate, orders, isLoadingOrders = fal
       </div>
 
       <div className="grid grid-cols-3 gap-3 md:gap-6">
-        {/* SALDO */}
         <div onClick={() => navigate('dash_mutasi')} className="group cursor-pointer relative overflow-hidden rounded-2xl md:rounded-3xl border border-red-900/30 hover:border-red-500/50 transition-all duration-300 bg-[#080101] p-4 md:p-7 shadow-[0_8px_32px_rgba(0,0,0,0.5)]">
           <div className="absolute -right-6 -top-6 w-24 h-24 bg-red-600/10 rounded-full blur-2xl group-hover:bg-red-600/20 transition-all"></div>
           <p className="text-[9px] md:text-[11px] text-red-300/40 font-black uppercase tracking-[0.3em] mb-2 md:mb-3">Saldo</p>
