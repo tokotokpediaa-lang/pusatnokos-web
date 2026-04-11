@@ -1014,19 +1014,7 @@ export default function AuthPage({ type, navigate, showToast }) {
               {isLogin ? 'Daftar Sekarang' : 'Masuk di sini'}
             </button>
           </div>
-          {!isLogin && (
-            <p className="text-xs text-gray-500 text-center mt-4">
-              Dengan mendaftar, kamu menyetujui{' '}
-              <button onClick={() => setLegalModal({ open: true, tab: 'terms-id' })} className="text-red-400 hover:underline font-semibold">
-                Syarat & Ketentuan
-              </button>{' '}
-              dan{' '}
-              <button onClick={() => setLegalModal({ open: true, tab: 'privacy-id' })} className="text-red-400 hover:underline font-semibold">
-                Kebijakan Privasi
-              </button>{' '}
-              kami.
-            </p>
-          )}
+
           {legalModal.open && (
             <LegalModal
               initialTab={legalModal.tab}
