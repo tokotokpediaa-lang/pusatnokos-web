@@ -228,11 +228,6 @@ function ProviderToggle({ provider, onChange }: { provider: '5sim' | 'smsactivat
             : 'text-gray-500 hover:text-white hover:bg-white/5'
         }`}
       >
-        <ProviderLogo
-          src="https://logo.clearbit.com/5sim.net"
-          fallbackEmoji="🔴"
-          alt="5sim"
-        />
         SERVER 1
       </button>
       <button
@@ -243,11 +238,6 @@ function ProviderToggle({ provider, onChange }: { provider: '5sim' | 'smsactivat
             : 'text-gray-500 hover:text-white hover:bg-white/5'
         }`}
       >
-        <ProviderLogo
-          src="https://logo.clearbit.com/sms-activate.org"
-          fallbackEmoji="🔵"
-          alt="SMS-Activate"
-        />
         SERVER 2
       </button>
     </div>
@@ -1450,10 +1440,11 @@ const getRealPrice = (countryId, serviceId, tier = 'reguler') => {
 
 // ---
 const ServiceIcon = React.memo(function ServiceIcon({ service, className = "w-12 h-12 text-xl" }: { service: any; className?: string }) {
-  // Tentukan sumber pertama: kalau ada domain di map, langsung pakai clearbit (lebih reliable)
+  // ✅ FIX PERF: Pakai Google Favicon sebagai primary — jauh lebih reliable dari clearbit
+  // yang sering ERR_NAME_NOT_RESOLVED. Urutan: Google Favicon → Clearbit → Iconify → Emoji
   const getInitialSrc = (svc: any): string | null => {
     const domain = SERVICE_DOMAIN_MAP[svc?.id];
-    if (domain) return `https://logo.clearbit.com/${domain}`;
+    if (domain) return `https://www.google.com/s2/favicons?domain=${domain}&sz=128`;
     return svc?.image || null; // fallback ke iconify SVG jika tidak ada di domain map
   };
 
@@ -1467,16 +1458,16 @@ const ServiceIcon = React.memo(function ServiceIcon({ service, className = "w-12
 
   const handleImgError = useCallback(() => {
     const domain = SERVICE_DOMAIN_MAP[service?.id];
-    if (fallbackStage.current === 0 && service?.image) {
-      // Stage 1: Coba iconify/image URL asli (sudah skip clearbit karena itu stage-0)
+    if (fallbackStage.current === 0 && domain) {
+      // Stage 1: Clearbit sebagai fallback dari Google Favicon
       fallbackStage.current = 1;
-      setImgSrc(service.image);
+      setImgSrc(`https://logo.clearbit.com/${domain}`);
       return;
     }
-    if (fallbackStage.current <= 1 && domain) {
-      // Stage 2: Google Favicon (selalu ada untuk domain valid)
+    if (fallbackStage.current <= 1 && service?.image) {
+      // Stage 2: Iconify SVG (jika ada)
       fallbackStage.current = 2;
-      setImgSrc(`https://www.google.com/s2/favicons?domain=${domain}&sz=128`);
+      setImgSrc(service.image);
       return;
     }
     // Stage 3: Tampilkan emoji icon

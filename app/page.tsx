@@ -1,18 +1,23 @@
 'use client';
 
 import dynamic from 'next/dynamic';
-const LegalPage      = dynamic(() => import('@/app/components/LegalPage'));
-const ContactPage    = dynamic(() => import('@/app/components/ContactPage'));
-const AdminPanelPage = dynamic(() => import('@/app/components/AdminPanelPage'), { ssr: false });
-const DepositPage     = dynamic(() => import('@/app/components/DepositPage'),     { ssr: false });
-const BuyNumberPage      = dynamic(() => import('@/app/components/BuyNumberPage'),      { ssr: false });
-const OrderHistoryPage   = dynamic(() => import('@/app/components/OrderHistoryPage'),   { ssr: false });
-const DashHome       = dynamic(() => import('@/app/components/DashComponents'),                                        { ssr: false });
-const SettingsPage   = dynamic(() => import('@/app/components/DashComponents').then(m => ({ default: m.SettingsPage })), { ssr: false });
-const MutasiPage     = dynamic(() => import('@/app/components/DashComponents').then(m => ({ default: m.MutasiPage })),   { ssr: false });
-const AuthPage           = dynamic(() => import('@/app/components/AuthPage'),           { ssr: false });
-const PinVerifyPage      = dynamic(() => import('@/app/components/AuthPage').then(m => ({ default: m.PinVerifyPage })),  { ssr: false });
-const SetupPinPage       = dynamic(() => import('@/app/components/AuthPage').then(m => ({ default: m.SetupPinPage })),   { ssr: false });
+
+// Loading fallback ringan — background gelap supaya tidak ada blank flash
+const PageFallback = () => <div className="min-h-screen bg-[#0a0000]" />;
+const DashFallback = () => <div className="flex-1 min-h-screen bg-[#040101]" />;
+
+const LegalPage        = dynamic(() => import('@/app/components/LegalPage'),        { loading: () => <PageFallback /> });
+const ContactPage      = dynamic(() => import('@/app/components/ContactPage'),      { loading: () => <PageFallback /> });
+const AdminPanelPage   = dynamic(() => import('@/app/components/AdminPanelPage'),   { ssr: false, loading: () => <DashFallback /> });
+const DepositPage      = dynamic(() => import('@/app/components/DepositPage'),      { ssr: false, loading: () => <DashFallback /> });
+const BuyNumberPage    = dynamic(() => import('@/app/components/BuyNumberPage'),    { ssr: false, loading: () => <DashFallback /> });
+const OrderHistoryPage = dynamic(() => import('@/app/components/OrderHistoryPage'), { ssr: false, loading: () => <DashFallback /> });
+const DashHome         = dynamic(() => import('@/app/components/DashComponents'),                                          { ssr: false, loading: () => <DashFallback /> });
+const SettingsPage     = dynamic(() => import('@/app/components/DashComponents').then(m => ({ default: m.SettingsPage })), { ssr: false, loading: () => <DashFallback /> });
+const MutasiPage       = dynamic(() => import('@/app/components/DashComponents').then(m => ({ default: m.MutasiPage })),   { ssr: false, loading: () => <DashFallback /> });
+const AuthPage         = dynamic(() => import('@/app/components/AuthPage'),           { ssr: false, loading: () => <PageFallback /> });
+const PinVerifyPage    = dynamic(() => import('@/app/components/AuthPage').then(m => ({ default: m.PinVerifyPage })),  { ssr: false, loading: () => <PageFallback /> });
+const SetupPinPage     = dynamic(() => import('@/app/components/AuthPage').then(m => ({ default: m.SetupPinPage })),   { ssr: false, loading: () => <PageFallback /> });
 
 import React, { useState, useEffect, useMemo, useRef, useCallback, memo, createContext, useContext } from 'react';
 import { createPortal } from 'react-dom';
@@ -1971,14 +1976,24 @@ export default function App() {
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
-    // Inject premium fonts
-    const ids = ['pn-font-preconnect','pn-font-gstatic','pn-font-link','pn-font-style'];
-    if (!document.getElementById(ids[0])) {
-      const lp = document.createElement('link'); lp.id=ids[0]; lp.rel='preconnect'; lp.href='https://fonts.googleapis.com'; document.head.appendChild(lp);
-      const lg = document.createElement('link'); lg.id=ids[1]; lg.rel='preconnect'; lg.href='https://fonts.gstatic.com'; lg.crossOrigin='anonymous'; document.head.appendChild(lg);
-      const lf = document.createElement('link'); lf.id=ids[2]; lf.rel='stylesheet'; lf.href='https://fonts.googleapis.com/css2?family=Sora:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;700&display=swap'; document.head.appendChild(lf);
-      const st = document.createElement('style'); st.id=ids[3];
-      st.textContent = `*,button,input{font-family:'Sora',sans-serif!important}.mono-code,.font-mono{font-family:'JetBrains Mono',monospace!important}.scrollbar-custom::-webkit-scrollbar,.custom-scrollbar::-webkit-scrollbar{width:3px}.scrollbar-custom::-webkit-scrollbar-thumb,.custom-scrollbar::-webkit-scrollbar-thumb{background:rgba(220,38,38,.25);border-radius:9px}@keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-6px)}}.animate-float{animation:float 4s ease-in-out infinite}@keyframes pn-pulse{0%,100%{opacity:.6}50%{opacity:1}}.animate-pn-pulse{animation:pn-pulse 2s ease-in-out infinite}@keyframes marquee{0%{transform:translateX(0%)}100%{transform:translateX(-50%)}}.animate-marquee{animation:marquee 18s linear infinite;will-change:transform}.animate-marquee:hover{animation-play-state:paused}.announcement-track{display:flex;width:max-content}`;
+    // ✅ FIX PERF: Sora sudah di-load oleh next/font di layout.tsx — tidak perlu inject ulang.
+    // Hanya inject utility styles (scrollbar, animasi) yang tidak ada di globals.css.
+    const STYLE_ID = 'pn-utility-styles';
+    if (!document.getElementById(STYLE_ID)) {
+      const st = document.createElement('style');
+      st.id = STYLE_ID;
+      st.textContent = [
+        // JetBrains Mono untuk kode
+        `.mono-code,.font-mono{font-family:'JetBrains Mono',monospace!important}`,
+        // Scrollbar custom
+        `.scrollbar-custom::-webkit-scrollbar,.custom-scrollbar::-webkit-scrollbar{width:3px}`,
+        `.scrollbar-custom::-webkit-scrollbar-thumb,.custom-scrollbar::-webkit-scrollbar-thumb{background:rgba(220,38,38,.25);border-radius:9px}`,
+        // Animasi
+        `@keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-6px)}}.animate-float{animation:float 4s ease-in-out infinite}`,
+        `@keyframes pn-pulse{0%,100%{opacity:.6}50%{opacity:1}}.animate-pn-pulse{animation:pn-pulse 2s ease-in-out infinite}`,
+        `@keyframes marquee{0%{transform:translateX(0%)}100%{transform:translateX(-50%)}}.animate-marquee{animation:marquee 18s linear infinite;will-change:transform}.animate-marquee:hover{animation-play-state:paused}`,
+        `.announcement-track{display:flex;width:max-content}`,
+      ].join('');
       document.head.appendChild(st);
     }
   }, []);
