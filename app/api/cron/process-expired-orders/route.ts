@@ -15,7 +15,7 @@
 // Artinya: walaupun user tutup Chrome, refund tetap berjalan otomatis.
 //
 // Alur per order:
-//   1. Ambil semua order status 'active' yang sudah melewati ORDER_TTL_MS
+//   1. Ambil semua order status 'active' yang createdAt <= (now - ORDER_TTL_MS)
 //   2. Cek ke provider (5sim / SMS-Activate) apakah OTP sudah masuk
 //   3. Kalau sudah ada OTP → skip (update status SUCCESS saja)
 //   4. Kalau belum ada OTP → cancel di provider → refund saldo ke user
@@ -23,7 +23,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { adminDb } from '@/lib/firebaseAdmin';
-import { FieldValue } from 'firebase-admin/firestore';
+import { FieldValue, Timestamp } from 'firebase-admin/firestore';
 
 const CRON_SECRET       = process.env.CRON_SECRET;
 const FIVESIM_API_KEY   = process.env.FIVESIM_API_KEY;
@@ -229,35 +229,32 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
-  const now    = Date.now();
-  const cutoff = now - ORDER_TTL_MS;
+  const now             = Date.now();
+  const cutoff          = now - ORDER_TTL_MS;
+  // FIX: gunakan Firestore Timestamp agar bisa dipakai di query .where()
+  const cutoffTimestamp = Timestamp.fromMillis(cutoff);
 
   let processed = 0;
   let skipped   = 0;
   let errors    = 0;
 
   try {
-    // Ambil order yang masih 'active' — filter expired dilakukan di bawah
-    // karena Firestore tidak bisa filter berdasarkan computed value (now - createdAt)
+    // FIX: filter langsung di Firestore pakai createdAt <= cutoffTimestamp
+    // sehingga index (status ASC, createdAt ASC) terpenuhi dan tidak FAILED_PRECONDITION
     const snap = await adminDb
       .collectionGroup('orders')
       .where('status', '==', 'active')
+      .where('createdAt', '<=', cutoffTimestamp)
+      .orderBy('createdAt', 'asc')
       .limit(BATCH_LIMIT)
       .get();
 
-    console.log(`[cron] Total order 'active' ditemukan: ${snap.size}`);
+    console.log(`[cron] Total order 'active' expired ditemukan: ${snap.size}`);
 
     for (const doc of snap.docs) {
-      const data      = doc.data();
-      const createdAt = toMs(data.createdAt ?? data.timestamp);
-      const orderId   = doc.id;
-      const provider  = (data.provider ?? '').toLowerCase(); // '5sim' atau 'smsactivate'
-
-      // Belum expired — lewati
-      if (!createdAt || createdAt > cutoff) {
-        skipped++;
-        continue;
-      }
+      const data     = doc.data();
+      const orderId  = doc.id;
+      const provider = (data.provider ?? '').toLowerCase(); // '5sim' atau 'smsactivate'
 
       try {
         // ── SERVER 1: 5sim ──────────────────────────────────────────────────
@@ -339,7 +336,7 @@ export async function GET(req: NextRequest) {
     });
 
   } catch (err: any) {
-    console.error('[cron] Fatal error:', err.message);
-    return NextResponse.json({ error: 'Internal Server Error' }, { status: 500 });
+    console.error('[cron] Fatal error:', err.message, err);
+    return NextResponse.json({ error: 'Internal Server Error', detail: err.message }, { status: 500 });
   }
 }
