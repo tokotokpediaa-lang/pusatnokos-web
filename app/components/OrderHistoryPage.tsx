@@ -1149,20 +1149,45 @@ function ActiveOrderItem({ order, compact = false, showToast }) {
   // ✅ FIX: onExpire sekarang update Firestore secara langsung agar order
   // hilang dari Status Live segera setelah waktu habis, tanpa tunggu polling.
   const onExpire = useCallback(async () => {
-    if (statusRef.current !== 'active' && statusRef.current !== 'pending') return; // sudah di-cancel/sukses
+    if (statusRef.current !== 'active' && statusRef.current !== 'pending') return;
     try {
       if (!auth?.currentUser) return;
-      // Update status lokal dulu agar UI langsung responsif
-      const expiredStatus = order.provider === 'smsactivate' ? 'CANCELLED' : 'canceled';
+
+      const token = await auth.currentUser.getIdToken();
+      // FIX: Konsisten UPPERCASE untuk semua provider
+      const expiredStatus = 'CANCELLED';
+
+      // Update UI lokal dulu agar terasa responsif
       setOtpData(prev => ({ ...prev, status: expiredStatus }));
       statusRef.current = expiredStatus;
-      // Sync ke Firestore agar hilang dari activeOrders filter
-      await updateDoc(
-        doc(db, 'users', auth.currentUser.uid, 'orders', order.id),
-        { status: expiredStatus }
-      );
+
+      if (order.provider === 'smsactivate') {
+        // FIX: Server 2 — cancel + refund via set-status (status 8 = cancel)
+        fetch('/api/smsactivate/set-status', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+          body: JSON.stringify({ orderId: order.id, status: 8 }),
+        }).catch(err => console.warn('[onExpire] smsactivate set-status gagal:', err?.message));
+      } else {
+        // FIX: Server 1 (5sim) — trigger timeout-order => cancel + refund saldo
+        fetch('/api/timeout-order', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+          body: JSON.stringify({ orderId: order.id }),
+        }).catch(err => console.warn('[onExpire] timeout-order gagal:', err?.message));
+      }
+
+      // Sync status ke Firestore agar hilang dari activeOrders filter
+      if (db) {
+        try {
+          await updateDoc(
+            doc(db, 'users', auth.currentUser.uid, 'orders', order.id),
+            { status: expiredStatus }
+          );
+        } catch { /* silent — UI sudah update */ }
+      }
     } catch {
-      // Jika Firestore gagal, UI sudah update — tidak perlu error toast
+      // Jika gagal, UI sudah terupdate — tidak perlu error toast
     }
   }, [order.id, order.provider]);
 
@@ -1184,7 +1209,7 @@ function ActiveOrderItem({ order, compact = false, showToast }) {
 
   const { formatTime, seconds } = useCountdown(
     effectiveExpiresAt,
-    otpData.status === 'active',
+    otpData.status === 'active' || otpData.status === 'pending', // ✅ FIX: Server 2 mulai 'pending'
     onExpire
   );
 
@@ -1222,6 +1247,13 @@ function ActiveOrderItem({ order, compact = false, showToast }) {
       // ikut berubah via real-time listener. Tanpa ini, order tetap muncul di
       // "Status Live" karena Firestore masih menyimpan status 'active'.
       // Error permission di-silent karena status lokal sudah diupdate via setOtpData.
+      // FIX: Deklarasikan canceledStatus DI ATAS sebelum dipakai (fix ReferenceError TDZ)
+      const canceledStatus = order.provider === 'smsactivate' ? 'CANCELLED' : 'CANCELLED';
+
+      // FIX: Update statusRef SYNCHRONOUS sebelum setOtpData agar poll in-flight
+      // tidak lolos guard dan tidak trigger double toast
+      statusRef.current = canceledStatus;
+
       if (db) {
         try {
           await updateDoc(
@@ -1230,13 +1262,6 @@ function ActiveOrderItem({ order, compact = false, showToast }) {
           );
         } catch (_) { /* silent — tidak ganggu user jika Firestore rules belum allow */ }
       }
-
-      // ✅ FIX DOUBLE TOAST: Update statusRef SYNCHRONOUS sebelum setOtpData.
-      // Tanpa ini, poll yang sedang in-flight bisa selesai setelah cancel di-click
-      // tapi sebelum statusRef diupdate via useEffect — menyebabkan handleData
-      // lolos guard dan menampilkan toast OTP kedua (dari SMS yang datang bersamaan).
-      const canceledStatus = order.provider === 'smsactivate' ? 'CANCELLED' : 'canceled';
-      statusRef.current = canceledStatus;
 
       showToast('Pesanan dibatalkan. Saldo dikembalikan.', 'info');
       setOtpData(prev => ({ ...prev, status: canceledStatus, otp: null }));
