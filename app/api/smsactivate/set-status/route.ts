@@ -82,11 +82,6 @@ export async function POST(req: NextRequest) {
     const order = orderSnap.data()!;
 
     // ─── FIX #C1: Ownership check ketat — tidak bergantung pada field userId ──
-    // Sebelumnya: `if (order.userId && order.userId !== uid)` → bisa di-bypass
-    // jika field userId tidak ada (dokumen lama). Sekarang: kepemilikan
-    // dibuktikan murni dari posisi dokumen di subcollection users/{uid}/orders.
-    // Jika dokumen ada di sana, user sudah terbukti pemiliknya melalui Firestore path.
-    // Untuk double-check dokumen lama yang punya userId, tetap validasi:
     if (order.userId !== undefined && order.userId !== uid) {
       console.error('[set-status] userId mismatch! uid:', uid, 'order.userId:', order.userId);
       return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
@@ -109,11 +104,11 @@ export async function POST(req: NextRequest) {
 
     if (statusNum === 8) {
       const createdAt    = parseTimestamp(order.createdAt);
-      const threeMinutes = 3 * 60 * 1000;
+      const fiveMinutes  = 5 * 60 * 1000;
       const elapsed      = Date.now() - createdAt;
 
-      if (createdAt > 0 && elapsed < threeMinutes) {
-        const sisaMs        = threeMinutes - elapsed;
+      if (createdAt > 0 && elapsed < fiveMinutes) {
+        const sisaMs        = fiveMinutes - elapsed;
         const sisaDetik     = Math.ceil(sisaMs / 1000);
         const sisaMenit     = Math.floor(sisaDetik / 60);
         const sisaDetikSisa = sisaDetik % 60;
@@ -123,7 +118,7 @@ export async function POST(req: NextRequest) {
 
         return NextResponse.json(
           {
-            error:       `Pesanan baru bisa dibatalkan setelah 3 menit. Tunggu ${sisaLabel} lagi.`,
+            error:       `Pesanan baru bisa dibatalkan setelah 5 menit. Tunggu ${sisaLabel} lagi.`,
             remainingMs: sisaMs,
           },
           { status: 400 },
@@ -132,7 +127,6 @@ export async function POST(req: NextRequest) {
     }
 
     // ─── CEK OTP DULU sebelum cancel (status 8) ──────────────────────────────
-    // Kalau OTP sudah masuk di provider, jangan cancel — tampilkan OTP ke user
     if (statusNum === 8) {
       try {
         const checkRes  = await fetch(
@@ -140,10 +134,8 @@ export async function POST(req: NextRequest) {
         );
         const checkText = (await checkRes.text()).trim();
 
-        // HeroSMS mengembalikan "STATUS_OK:KODE" kalau OTP sudah masuk
         if (checkText.startsWith('STATUS_OK:')) {
           const otp = checkText.split(':')[1] ?? '';
-          // Simpan OTP ke Firestore supaya langsung tampil di UI user
           await orderRef.update({
             otp:       otp,
             status:    'SUCCESS',
@@ -159,15 +151,11 @@ export async function POST(req: NextRequest) {
           );
         }
       } catch (checkErr) {
-        // Kalau cek gagal, lanjutkan cancel — lebih aman daripada stuck
         console.warn('[set-status] Gagal cek OTP sebelum cancel, lanjutkan cancel:', checkErr);
       }
     }
 
-    // ─── FIX #H3: Fresh read tepat sebelum panggil SA untuk mempersempit window ─
-    // Tidak bisa eliminasi race condition 100% tanpa distributed lock,
-    // tapi fresh read di sini memastikan kita tidak salah panggil SA
-    // jika order sudah berubah final sejak pre-read di atas.
+    // ─── FIX #H3: Fresh read tepat sebelum panggil SA ────────────────────────
     const freshPreCheckSnap = await orderRef.get();
     if (!freshPreCheckSnap.exists || FINAL_STATUSES.includes(freshPreCheckSnap.data()?.status)) {
       return NextResponse.json(
@@ -187,7 +175,6 @@ export async function POST(req: NextRequest) {
         '[set-status] SA menolak request. activationId:', order.activationId,
         'status:', statusNum, 'saResponse:', saText,
       );
-      // ─── FIX #H4: Jangan kirim raw saText ke client — bisa mengandung info internal SA ──
       return NextResponse.json(
         { error: 'Gagal mengubah status di provider. Silakan coba lagi.' },
         { status: 502 },
@@ -240,19 +227,12 @@ export async function POST(req: NextRequest) {
         });
       } catch (txErr: any) {
         if (txErr.message === 'ORDER_ALREADY_FINAL') {
-          // ─── FIX #C2: SA sudah cancel, tapi order di Firestore sudah final ────────
-          // Ini bisa berarti:
-          // - Status 'CANCELLED' → refund sudah berjalan, tidak perlu lagi
-          // - Status 'SUCCESS'/'COMPLETED' → user sudah dapat OTP sebelum cancel
-          // Log sebagai KRITIS agar bisa di-review manual.
           console.error(
             '[set-status] ⚠️ KRITIS C2: SA berhasil CANCEL tapi order sudah FINAL di Firestore.',
             'Perlu review manual! orderId:', orderId,
             'activationId:', order.activationId,
             'currentStatus:', freshPreCheckSnap.data()?.status,
           );
-          // Kembalikan 200 — dari sisi SA sudah cancel, tidak ada yang bisa di-retry.
-          // Tim perlu review log ini secara manual.
           return NextResponse.json({
             success:  true,
             warning:  'Order sudah di status final sebelum cancel diproses. Silakan hubungi support jika ada masalah saldo.',
@@ -285,7 +265,6 @@ export async function POST(req: NextRequest) {
         });
       } catch (txErr: any) {
         if (txErr.message === 'ORDER_ALREADY_FINAL') {
-          // ─── FIX #C2 (complete variant): Log kritis untuk review manual ─────────
           console.error(
             '[set-status] ⚠️ KRITIS C2: SA berhasil COMPLETE tapi order sudah FINAL di Firestore.',
             'orderId:', orderId, 'activationId:', order.activationId,
@@ -303,7 +282,6 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // ─── FIX #H4: Tidak mengembalikan saText ke client ────────────────────────
     return NextResponse.json({ success: true });
 
   } catch (err: any) {

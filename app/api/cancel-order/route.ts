@@ -24,7 +24,7 @@ function isCancellable(status: unknown): boolean {
   return CANCELLABLE_STATUSES_NORMALIZED.includes(status.toLowerCase());
 }
 
-const CANCEL_WAIT_MS = 3 * 60 * 1000; // 3 menit
+const CANCEL_WAIT_MS = 5 * 60 * 1000; // 5 menit
 
 // ─── FIX #M2: Status final UPPERCASE konsisten ───────────────────────────────
 // ─── FIX: Tambah 'canceled' (lowercase) sebagai fallback untuk dokumen lama ──
@@ -69,11 +69,6 @@ export async function POST(request: Request) {
 
     const orderData = orderSnap.data()!;
 
-    // ─── FIX #C3: Validasi provider ───────────────────────────────────────────
-    if (orderData.provider !== '5sim') {
-      return NextResponse.json({ message: 'Order ini bukan order 5sim.' }, { status: 400 });
-    }
-
     const createdAtMs = toMs(orderData.createdAt || orderData.timestamp);
     if (!createdAtMs) {
       return NextResponse.json({ message: 'Data pesanan tidak lengkap.' }, { status: 400 });
@@ -100,7 +95,7 @@ export async function POST(request: Request) {
         : `${sisaDetik} detik lagi`;
 
       return NextResponse.json({
-        message:     `Pesanan baru bisa dibatalkan setelah 3 menit. Sisa waktu: ${sisaLabel.trim()}.`,
+        message:     `Pesanan baru bisa dibatalkan setelah 5 menit. Tunggu ${sisaLabel.trim()} lagi.`,
         canCancelAt,
         remainingMs: sisaMs,
       }, { status: 400 });

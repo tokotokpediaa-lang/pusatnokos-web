@@ -1200,10 +1200,7 @@ function ActiveOrderItem({ order, compact = false, showToast }) {
         });
         if (!saRes.ok) {
           const saData = await saRes.json().catch(() => ({}));
-          if (saRes.status === 400) {
-            throw new Error('Pesanan belum bisa dibatalkan, tunggu hingga 3 menit berlalu.');
-          }
-          throw new Error(saData.message || `Gagal membatalkan pesanan (${saRes.status})`);
+          throw new Error(saData.error || saData.message || `Gagal membatalkan pesanan (${saRes.status})`);
         }
       } else {
         // 5sim: cancel via cancel-order endpoint
