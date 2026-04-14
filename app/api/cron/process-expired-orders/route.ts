@@ -315,9 +315,11 @@ export async function GET(req: NextRequest) {
           continue;
         }
 
-        // Provider tidak dikenal
+        // Provider tidak dikenal / kosong → langsung refund
         console.warn(`[cron] Provider tidak dikenal untuk orderId: ${orderId}, provider: ${provider}`);
-        skipped++;
+        await processRefund(doc, 'cron-timeout-unknown-provider');
+        console.log(`[cron] Order tanpa provider, refund diproses. orderId: ${orderId}`);
+        processed++;
 
       } catch (err: any) {
         console.error(`[cron] Error saat proses orderId: ${orderId}:`, err.message);
