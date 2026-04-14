@@ -16,7 +16,7 @@
 //
 // Alur per order:
 //   1. Ambil semua order status 'active' yang createdAt <= (now - ORDER_TTL_MS)
-//   2. Cek ke provider (5sim / SMS-Activate) apakah OTP sudah masuk
+//   2. Cek ke provider (5sim / Web Hero SMS) apakah OTP sudah masuk
 //   3. Kalau sudah ada OTP → skip (update status SUCCESS saja)
 //   4. Kalau belum ada OTP → cancel di provider → refund saldo ke user
 // ─────────────────────────────────────────────────────────────────────────────
@@ -27,7 +27,10 @@ import { FieldValue, Timestamp } from 'firebase-admin/firestore';
 
 const CRON_SECRET       = process.env.CRON_SECRET;
 const FIVESIM_API_KEY   = process.env.FIVESIM_API_KEY;
-const SA_API_KEY        = process.env.SMSACTIVATE_API_KEY; // ganti sesuai nama di .env kamu
+const SA_API_KEY        = process.env.SMSACTIVATE_API_KEY;
+
+// Base URL Web Hero SMS — kompatibel dengan format SMS-Activate
+const HERO_SMS_BASE_URL = 'https://hero-sms.com/stubs/handler_api.php';
 
 // TTL order sebelum dianggap expired — sesuaikan dengan timer di UI kamu
 const ORDER_TTL_MS = 20 * 60 * 1000; // 20 menit
@@ -48,7 +51,7 @@ function toMs(val: unknown): number {
 async function checkOtp5sim(fiveSimOrderId: string): Promise<{
   hasOtp: boolean;
   otp: string | null;
-  shouldCancel: boolean; // true = boleh cancel, false = jangan diapa-apain
+  shouldCancel: boolean;
 }> {
   if (!FIVESIM_API_KEY) return { hasOtp: false, otp: null, shouldCancel: true };
 
@@ -63,9 +66,7 @@ async function checkOtp5sim(fiveSimOrderId: string): Promise<{
     });
 
     if (!res.ok) {
-      // Kalau 404 = order tidak ada di 5sim, boleh cancel di Firestore saja
       if (res.status === 404) return { hasOtp: false, otp: null, shouldCancel: true };
-      // Error lain → skip dulu, coba lagi di cron berikutnya
       return { hasOtp: false, otp: null, shouldCancel: false };
     }
 
@@ -80,7 +81,6 @@ async function checkOtp5sim(fiveSimOrderId: string): Promise<{
     return { hasOtp: false, otp: null, shouldCancel: true };
   } catch (err: any) {
     console.warn('[cron] Gagal cek OTP 5sim, skip order ini:', err.message);
-    // Kalau tidak bisa cek, jangan cancel — lebih aman tunggu cron berikutnya
     return { hasOtp: false, otp: null, shouldCancel: false };
   }
 }
@@ -102,8 +102,8 @@ async function cancelAt5sim(fiveSimOrderId: string): Promise<void> {
   }
 }
 
-// ─── Cek OTP ke SMS-Activate ──────────────────────────────────────────────────
-async function checkOtpSmsActivate(activationId: string): Promise<{
+// ─── Cek OTP ke Web Hero SMS ──────────────────────────────────────────────────
+async function checkOtpHeroSms(activationId: string): Promise<{
   hasOtp: boolean;
   otp: string | null;
   shouldCancel: boolean;
@@ -112,17 +112,19 @@ async function checkOtpSmsActivate(activationId: string): Promise<{
   if (!SA_API_KEY) return { hasOtp: false, otp: null, shouldCancel: true, alreadyCancelled: false };
 
   try {
-    const url = `https://api.sms-activate.org/stubs/handler_api.php?api_key=${SA_API_KEY}&action=getStatus&id=${activationId}`;
-    const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    const url = `${HERO_SMS_BASE_URL}?api_key=${SA_API_KEY}&action=getStatus&id=${activationId}`;
+    const res  = await fetch(url, { signal: AbortSignal.timeout(8000) });
     const text = (await res.text()).trim();
 
-    // STATUS_OK:123456 → OTP sudah masuk
+    console.log(`[cron][HeroSMS] getStatus activationId: ${activationId}, response: ${text}`);
+
+    // OTP sudah masuk
     if (text.startsWith('STATUS_OK:')) {
       const otp = text.split(':')[1] ?? null;
       return { hasOtp: true, otp, shouldCancel: false, alreadyCancelled: false };
     }
 
-    // Sudah dicancel sebelumnya di SA
+    // Sudah dicancel sebelumnya
     if (text === 'STATUS_CANCEL') {
       return { hasOtp: false, otp: null, shouldCancel: true, alreadyCancelled: true };
     }
@@ -132,24 +134,26 @@ async function checkOtpSmsActivate(activationId: string): Promise<{
       return { hasOtp: false, otp: null, shouldCancel: true, alreadyCancelled: false };
     }
 
-    // Tidak diketahui / error dari SA → skip dulu
-    console.warn('[cron] SA getStatus response tidak dikenal:', text, 'activationId:', activationId);
+    // Response tidak dikenal → skip, coba lagi cron berikutnya
+    console.warn('[cron][HeroSMS] Response getStatus tidak dikenal:', text, 'activationId:', activationId);
     return { hasOtp: false, otp: null, shouldCancel: false, alreadyCancelled: false };
 
   } catch (err: any) {
-    console.warn('[cron] Gagal cek OTP SA, skip order ini:', err.message);
+    console.warn('[cron] Gagal cek OTP Hero SMS, skip order ini:', err.message);
     return { hasOtp: false, otp: null, shouldCancel: false, alreadyCancelled: false };
   }
 }
 
-// ─── Cancel order ke SMS-Activate (best-effort) ───────────────────────────────
-async function cancelAtSmsActivate(activationId: string): Promise<void> {
+// ─── Cancel order ke Web Hero SMS (best-effort) ───────────────────────────────
+async function cancelAtHeroSms(activationId: string): Promise<void> {
   if (!SA_API_KEY) return;
   try {
-    const url = `https://api.sms-activate.org/stubs/handler_api.php?api_key=${SA_API_KEY}&action=setStatus&id=${activationId}&status=8`;
-    await fetch(url, { signal: AbortSignal.timeout(8000) });
+    const url = `${HERO_SMS_BASE_URL}?api_key=${SA_API_KEY}&action=cancelActivation&id=${activationId}`;
+    const res  = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    const text = (await res.text()).trim();
+    console.log(`[cron][HeroSMS] cancelActivation activationId: ${activationId}, response: ${text}`);
   } catch (err: any) {
-    console.warn('[cron] SA cancel error (Firestore tetap diproses):', err.message);
+    console.warn('[cron] Hero SMS cancel error (Firestore tetap diproses):', err.message);
   }
 }
 
@@ -172,7 +176,6 @@ async function processRefund(
     if (!fresh.exists) return;
 
     const freshStatus = fresh.data()?.status;
-    // Sudah diproses sebelumnya (misal oleh webhook)
     if (['SUCCESS', 'COMPLETED', 'CANCELLED'].includes(freshStatus) || freshStatus === 'canceled') {
       return;
     }
@@ -223,7 +226,6 @@ async function processOtpFound(
 
 // ─── Main Handler ─────────────────────────────────────────────────────────────
 export async function GET(req: NextRequest) {
-  // Proteksi: hanya Vercel Cron atau caller dengan CRON_SECRET yang boleh akses
   const authHeader = req.headers.get('authorization');
   if (!CRON_SECRET || authHeader !== `Bearer ${CRON_SECRET}`) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
@@ -231,7 +233,6 @@ export async function GET(req: NextRequest) {
 
   const now             = Date.now();
   const cutoff          = now - ORDER_TTL_MS;
-  // FIX: gunakan Firestore Timestamp agar bisa dipakai di query .where()
   const cutoffTimestamp = Timestamp.fromMillis(cutoff);
 
   let processed = 0;
@@ -239,8 +240,6 @@ export async function GET(req: NextRequest) {
   let errors    = 0;
 
   try {
-    // FIX: filter langsung di Firestore pakai createdAt <= cutoffTimestamp
-    // sehingga index (status ASC, createdAt ASC) terpenuhi dan tidak FAILED_PRECONDITION
     const snap = await adminDb
       .collectionGroup('orders')
       .where('status', '==', 'active')
@@ -254,7 +253,7 @@ export async function GET(req: NextRequest) {
     for (const doc of snap.docs) {
       const data     = doc.data();
       const orderId  = doc.id;
-      const provider = (data.provider ?? '').toLowerCase(); // '5sim' atau 'smsactivate'
+      const provider = (data.provider ?? '').toLowerCase();
 
       try {
         // ── SERVER 1: 5sim ──────────────────────────────────────────────────
@@ -264,7 +263,6 @@ export async function GET(req: NextRequest) {
           const { hasOtp, otp, shouldCancel } = await checkOtp5sim(fiveSimOrderId);
 
           if (hasOtp && otp) {
-            // OTP sudah masuk → update SUCCESS, jangan cancel
             await processOtpFound(doc, otp);
             console.log(`[cron][5sim] OTP ditemukan, update SUCCESS. orderId: ${orderId}`);
             processed++;
@@ -272,12 +270,10 @@ export async function GET(req: NextRequest) {
           }
 
           if (!shouldCancel) {
-            // Tidak bisa cek → skip, coba lagi nanti
             skipped++;
             continue;
           }
 
-          // Tidak ada OTP → cancel di 5sim lalu refund
           await cancelAt5sim(fiveSimOrderId);
           await processRefund(doc, 'cron-timeout-5sim');
           console.log(`[cron][5sim] Timeout, refund diproses. orderId: ${orderId}`);
@@ -285,16 +281,16 @@ export async function GET(req: NextRequest) {
           continue;
         }
 
-        // ── SERVER 2: SMS-Activate ──────────────────────────────────────────
-        if (provider === 'smsactivate') {
+        // ── SERVER 2: Web Hero SMS ──────────────────────────────────────────
+        if (provider === 'smsactivate' || provider === 'webhero' || provider === 'hero-sms') {
           const activationId = String(data.activationId ?? data.id ?? orderId);
 
           const { hasOtp, otp, shouldCancel, alreadyCancelled } =
-            await checkOtpSmsActivate(activationId);
+            await checkOtpHeroSms(activationId);
 
           if (hasOtp && otp) {
             await processOtpFound(doc, otp);
-            console.log(`[cron][SA] OTP ditemukan, update SUCCESS. orderId: ${orderId}`);
+            console.log(`[cron][HeroSMS] OTP ditemukan, update SUCCESS. orderId: ${orderId}`);
             processed++;
             continue;
           }
@@ -304,18 +300,17 @@ export async function GET(req: NextRequest) {
             continue;
           }
 
-          // Kalau belum dicancel di SA → cancel dulu
           if (!alreadyCancelled) {
-            await cancelAtSmsActivate(activationId);
+            await cancelAtHeroSms(activationId);
           }
 
-          await processRefund(doc, 'cron-timeout-smsactivate');
-          console.log(`[cron][SA] Timeout, refund diproses. orderId: ${orderId}`);
+          await processRefund(doc, 'cron-timeout-herosms');
+          console.log(`[cron][HeroSMS] Timeout, refund diproses. orderId: ${orderId}`);
           processed++;
           continue;
         }
 
-        // Provider tidak dikenal / kosong → langsung refund
+        // Provider tidak dikenal → langsung refund
         console.warn(`[cron] Provider tidak dikenal untuk orderId: ${orderId}, provider: ${provider}`);
         await processRefund(doc, 'cron-timeout-unknown-provider');
         console.log(`[cron] Order tanpa provider, refund diproses. orderId: ${orderId}`);
