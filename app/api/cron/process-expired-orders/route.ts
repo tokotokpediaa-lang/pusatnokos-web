@@ -38,6 +38,21 @@ const ORDER_TTL_MS = 20 * 60 * 1000; // 20 menit
 // Batas maksimal order yang diproses per satu kali cron (hindari timeout Vercel)
 const BATCH_LIMIT = 50;
 
+// ─── Helper: deteksi apakah order ini dari Web Hero SMS ──────────────────────
+// Menangkap semua kemungkinan: field provider tidak ada, atau hanya ada operator
+function isHeroSmsOrder(data: FirebaseFirestore.DocumentData): boolean {
+  const provider = (data.provider ?? '').toLowerCase();
+  const operator = (data.operator ?? '').toLowerCase();
+
+  // Eksplisit dari field provider
+  if (['smsactivate', 'webhero', 'hero-sms', 'herosms'].includes(provider)) return true;
+
+  // Fallback: cek field operator — HeroSMS selalu pakai format "virtualXX"
+  if (operator.startsWith('virtual')) return true;
+
+  return false;
+}
+
 // ─── Helper: toMs ─────────────────────────────────────────────────────────────
 function toMs(val: unknown): number {
   if (!val) return 0;
@@ -251,8 +266,8 @@ export async function GET(req: NextRequest) {
     console.log(`[cron] Total order 'active' expired ditemukan: ${snap.size}`);
 
     for (const doc of snap.docs) {
-      const data     = doc.data();
-      const orderId  = doc.id;
+      const data    = doc.data();
+      const orderId = doc.id;
       const provider = (data.provider ?? '').toLowerCase();
 
       try {
@@ -282,8 +297,12 @@ export async function GET(req: NextRequest) {
         }
 
         // ── SERVER 2: Web Hero SMS ──────────────────────────────────────────
-        if (provider === 'smsactivate' || provider === 'webhero' || provider === 'hero-sms') {
+        // FIX: deteksi via isHeroSmsOrder() — menangkap operator "virtualXX"
+        // walaupun field "provider" tidak ada di dokumen Firestore
+        if (isHeroSmsOrder(data)) {
           const activationId = String(data.activationId ?? data.id ?? orderId);
+
+          console.log(`[cron][HeroSMS] Memproses orderId: ${orderId}, activationId: ${activationId}, operator: ${data.operator ?? '-'}`);
 
           const { hasOtp, otp, shouldCancel, alreadyCancelled } =
             await checkOtpHeroSms(activationId);
@@ -305,15 +324,15 @@ export async function GET(req: NextRequest) {
           }
 
           await processRefund(doc, 'cron-timeout-herosms');
-          console.log(`[cron][HeroSMS] Timeout, refund diproses. orderId: ${orderId}`);
+          console.log(`[cron][HeroSMS] Timeout, cancel + refund diproses. orderId: ${orderId}`);
           processed++;
           continue;
         }
 
-        // Provider tidak dikenal → langsung refund
-        console.warn(`[cron] Provider tidak dikenal untuk orderId: ${orderId}, provider: ${provider}`);
+        // Provider tidak dikenal → langsung refund tanpa cancel ke provider
+        console.warn(`[cron] Provider tidak dikenal untuk orderId: ${orderId}, provider: "${provider}", operator: "${data.operator ?? '-'}"`);
         await processRefund(doc, 'cron-timeout-unknown-provider');
-        console.log(`[cron] Order tanpa provider, refund diproses. orderId: ${orderId}`);
+        console.log(`[cron] Order tanpa provider dikenal, refund diproses. orderId: ${orderId}`);
         processed++;
 
       } catch (err: any) {

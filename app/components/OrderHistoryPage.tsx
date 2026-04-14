@@ -1035,7 +1035,12 @@ function ActiveOrderItem({ order, compact = false, showToast }) {
 
       const incomingStatus = normalizeStatus(data.status || 'active');
 
-      if (data.otp && data.otp !== otpRef.current) {
+      // ✅ FIX DOUBLE TOAST: Cek statusRef SEBELUM tampilkan notif OTP.
+      // Jika cancel sudah diproses (statusRef diset synchronous di handleCancel),
+      // poll yang baru resolve tidak akan menampilkan toast OTP meski data.otp ada.
+      if (data.otp && data.otp !== otpRef.current
+          && statusRef.current !== 'canceled'
+          && statusRef.current !== 'CANCELLED') {
         showToast(
           `OTP diterima untuk ${order.saName || order.serviceId?.toUpperCase()}: ${data.otp}`,
           'success'
@@ -1221,13 +1226,20 @@ function ActiveOrderItem({ order, compact = false, showToast }) {
         try {
           await updateDoc(
             doc(db, 'users', auth.currentUser.uid, 'orders', order.id),
-            { status: order.provider === 'smsactivate' ? 'CANCELLED' : 'canceled' }
+            { status: canceledStatus }
           );
         } catch (_) { /* silent — tidak ganggu user jika Firestore rules belum allow */ }
       }
 
+      // ✅ FIX DOUBLE TOAST: Update statusRef SYNCHRONOUS sebelum setOtpData.
+      // Tanpa ini, poll yang sedang in-flight bisa selesai setelah cancel di-click
+      // tapi sebelum statusRef diupdate via useEffect — menyebabkan handleData
+      // lolos guard dan menampilkan toast OTP kedua (dari SMS yang datang bersamaan).
+      const canceledStatus = order.provider === 'smsactivate' ? 'CANCELLED' : 'canceled';
+      statusRef.current = canceledStatus;
+
       showToast('Pesanan dibatalkan. Saldo dikembalikan.', 'info');
-      setOtpData(prev => ({ ...prev, status: order.provider === 'smsactivate' ? 'CANCELLED' : 'canceled', otp: null }));
+      setOtpData(prev => ({ ...prev, status: canceledStatus, otp: null }));
     } catch (err: any) {
       showToast(err.message || 'Gagal membatalkan.', 'error');
     } finally {
@@ -1237,7 +1249,10 @@ function ActiveOrderItem({ order, compact = false, showToast }) {
 
   const displayStatus = otpData.status;
   const displayOtp = otpData.otp;
-  const isActive = displayStatus === 'active';
+  // ✅ FIX: Sertakan 'pending' agar order Server 2 (smsactivate) tetap tampilkan
+  // cancel button. Status awal SA bisa 'pending', bukan 'active', sehingga tanpa
+  // ini tombol Batal tidak pernah muncul sampai timer habis dan onExpire dipanggil.
+  const isActive = displayStatus === 'active' || displayStatus === 'pending';
   const isSuccess = displayStatus === 'success' || displayStatus === 'finished';
   const isCanceled = displayStatus === 'canceled' || displayStatus === 'CANCELLED';
 
