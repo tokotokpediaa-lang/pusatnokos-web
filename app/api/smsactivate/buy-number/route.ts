@@ -1,7 +1,7 @@
 // /api/smsactivate/buy-number/route.ts
 import { NextRequest, NextResponse } from 'next/server';
 import { adminAuth, adminDb } from '@/lib/firebaseAdmin';
-import { FieldValue } from 'firebase-admin/firestore';
+import { FieldValue, Timestamp } from 'firebase-admin/firestore';
 
 const SA_BASE = 'https://hero-sms.com/stubs/handler_api.php';
 const SA_KEY  = process.env.SMSACTIVATE_API_KEY!;
@@ -180,8 +180,9 @@ export async function POST(req: NextRequest) {
       sms:          null,
       otp:          null,
       timestamp:    now,
-      createdAt:    new Date(now).toISOString(),
-      expiresAt:    new Date(now + 20 * 60 * 1000).toISOString(),
+      // ✅ FIX: Simpan sebagai Firestore Timestamp agar query cron bisa match
+      createdAt:    Timestamp.fromMillis(now),
+      expiresAt:    Timestamp.fromMillis(now + 20 * 60 * 1000),
     };
 
     await adminDb.runTransaction(async (t) => {
