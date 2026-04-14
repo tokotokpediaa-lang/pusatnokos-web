@@ -1,291 +1,247 @@
-// /api/smsactivate/set-status/route.ts
+/// /api/smsactivate/webhook/route.ts
+//
+// FIXES APPLIED:
+//  [BUG FIX #1] STATUS_CANCEL sekarang trigger refund saldo otomatis ke user
+//               (sebelumnya: status berubah CANCELLED tapi saldo tidak dikembalikan)
+//  [IMPROVE]    Refund dijalankan dalam Firestore transaction untuk keamanan
+//  [IMPROVE]    Mutasi refund dicatat di subcollection transactions user
+//
+// ⚠️ SETUP WAJIB:
+// 1. Daftarkan URL ini di dashboard SMS-Activate (TANPA ?secret= di URL):
+//    https://pusatnokos.ngrok-free.app/api/smsactivate/webhook
+//    Lalu set header: x-webhook-secret = <isi dari .env SMSACTIVATE_WEBHOOK_SECRET>
+//
+// 2. Buat Firestore index untuk collectionGroup 'orders':
+//    Fields: activationId (ASC), provider (ASC) | Scope: Collection group
+//
+// 3. Tambahkan ke .env.local:
+//    SMSACTIVATE_WEBHOOK_SECRET=isi_random_string_kamu
 
 import { NextRequest, NextResponse } from 'next/server';
-import { adminAuth, adminDb } from '@/lib/firebaseAdmin';
-import { FieldValue, Timestamp } from 'firebase-admin/firestore';
+import { adminDb } from '@/lib/firebaseAdmin';
+import { FieldValue } from 'firebase-admin/firestore';
 
-const SA_BASE = process.env.SMSACTIVATE_API_BASE ?? 'https://hero-sms.com/stubs/handler_api.php';
-const SA_KEY  = process.env.SMSACTIVATE_API_KEY;
+const WEBHOOK_SECRET = process.env.SMSACTIVATE_WEBHOOK_SECRET;
 
-// ─── FIX #L5: Hapus module-level console.error yang menyesatkan ──────────────
-// Guard sebenarnya ada di dalam handler (return 500 di bawah).
+// ─── Rate limiter in-memory (per IP) ──────────────────────────────────────────
+// ⚠️ NOTE: Hanya bekerja pada single instance.
+// Untuk multi-instance / serverless, gunakan Redis atau Upstash.
+const _rateLimitStore = new Map<string, number[]>();
+const RATE_LIMIT_MAX       = 60;
+const RATE_LIMIT_WINDOW_MS = 60_000;
 
-const ALLOWED_STATUSES = [6, 8]; // 6 = complete, 8 = cancel
-
-// ─── FIX #M2 / shared: Status final memakai casing UPPERCASE konsisten ────────
-const FINAL_STATUSES = ['SUCCESS', 'COMPLETED', 'CANCELLED'];
-
-function parseTimestamp(value: unknown): number {
-  if (!value) return 0;
-  if (value instanceof Timestamp) return value.toDate().getTime();
-  if (typeof value === 'object' && typeof (value as any).toDate === 'function') {
-    return (value as any).toDate().getTime();
-  }
-  const ms = new Date(value as any).getTime();
-  return isNaN(ms) ? 0 : ms;
+function isRateLimited(ip: string): boolean {
+  const now  = Date.now();
+  const prev = (_rateLimitStore.get(ip) ?? []).filter(t => now - t < RATE_LIMIT_WINDOW_MS);
+  if (prev.length >= RATE_LIMIT_MAX) return true;
+  prev.push(now);
+  _rateLimitStore.set(ip, prev);
+  return false;
 }
 
-const SA_SUCCESS_RESPONSES: Record<number, string[]> = {
-  6: ['ACCESS_ACTIVATION'],
-  8: ['ACCESS_CANCEL'],
-};
+const ALL_SMS_MAX_ENTRIES = 50;
 
-function isSASuccess(statusCode: number, saText: string): boolean {
-  const valid = SA_SUCCESS_RESPONSES[statusCode] ?? [];
-  return valid.some(v => saText.trim().toUpperCase().includes(v));
+interface SAWebhookPayload {
+  activationId: string;
+  service:      string;
+  text:         string | null;
+  code:         string | null;
+  country:      number;
+  receivedAt:   string;
+  status?:      string;
+}
+
+// Status final — UPPERCASE konsisten
+const FINAL_STATUSES = ['SUCCESS', 'COMPLETED', 'CANCELLED'];
+
+function mapStatus(code: string | null, rawStatus?: string): string {
+  if (rawStatus === 'STATUS_CANCEL')                  return 'CANCELLED';
+  if (rawStatus === 'STATUS_WAIT_RETRY')              return 'PENDING';
+  if (rawStatus === 'STATUS_WAIT_CODE')               return 'PENDING';
+  if (rawStatus === 'STATUS_WAIT_RESEND')             return 'PENDING';
+  if (rawStatus === 'STATUS_OK' && code)              return 'SUCCESS';
+  if (rawStatus === 'STATUS_OK' && !code)             return 'PENDING';
+  if (code)                                           return 'SUCCESS';
+  return 'PENDING';
 }
 
 export async function POST(req: NextRequest) {
-  // ─── FIX #L5: Guard yang bermakna ─────────────────────────────────────────
-  if (!SA_KEY) {
-    console.error('[set-status] SMSACTIVATE_API_KEY belum di-set di .env!');
-    return NextResponse.json({ error: 'Server tidak terkonfigurasi dengan benar' }, { status: 500 });
+  if (!WEBHOOK_SECRET) {
+    console.error('[SA webhook] SMSACTIVATE_WEBHOOK_SECRET belum di-set di .env — webhook diblokir');
+    return NextResponse.json({ error: 'Webhook not configured' }, { status: 500 });
+  }
+
+  const ip = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? 'unknown';
+  if (isRateLimited(ip)) {
+    console.warn('[SA webhook] Rate limit exceeded untuk IP:', ip);
+    return NextResponse.json({ error: 'Too Many Requests' }, { status: 429 });
+  }
+
+  const secret = req.headers.get('x-webhook-secret');
+  if (!secret || secret !== WEBHOOK_SECRET) {
+    console.warn('[SA webhook] Unauthorized — invalid or missing x-webhook-secret header');
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+
+  let payload: SAWebhookPayload;
+  try {
+    payload = await req.json();
+  } catch (parseErr) {
+    console.error('[SA webhook] Gagal parse JSON body:', parseErr);
+    return NextResponse.json({ received: true }, { status: 200 });
+  }
+
+  const { activationId, text, code, status: rawStatus, receivedAt: saReceivedAt } = payload;
+
+  if (!activationId || typeof activationId !== 'string' || activationId.trim() === '') {
+    return NextResponse.json({ error: 'activationId required' }, { status: 400 });
   }
 
   try {
-    // ─── FIX #L2: Validasi Content-Type ──────────────────────────────────────
-    const contentType = req.headers.get('content-type') ?? '';
-    if (!contentType.includes('application/json')) {
-      return NextResponse.json({ error: 'Content-Type harus application/json' }, { status: 415 });
+    const snap = await adminDb
+      .collectionGroup('orders')
+      .where('activationId', '==', activationId.trim())
+      .where('provider',     '==', 'smsactivate')
+      .limit(1)
+      .get();
+
+    if (snap.empty) {
+      console.warn('[SA webhook] Order not found for activationId:', activationId);
+      return NextResponse.json({ received: true });
     }
 
-    const authHeader = req.headers.get('Authorization') ?? '';
-    const token      = authHeader.replace('Bearer ', '').trim();
-    if (!token) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    const orderDoc  = snap.docs[0];
+    const orderData = orderDoc.data();
 
-    const decoded = await adminAuth.verifyIdToken(token);
-    const uid     = decoded.uid;
-
-    const body = await req.json();
-    const { orderId, status } = body;
-
-    if (!orderId || typeof orderId !== 'string' || orderId.trim() === '') {
-      return NextResponse.json({ error: 'orderId harus berupa string yang valid' }, { status: 400 });
-    }
-
-    if (status === undefined || status === null) {
-      return NextResponse.json({ error: 'orderId & status required' }, { status: 400 });
-    }
-
-    const statusNum = Number(status);
-    if (!Number.isInteger(statusNum) || !ALLOWED_STATUSES.includes(statusNum)) {
-      return NextResponse.json(
-        { error: `Status tidak valid. Hanya boleh: ${ALLOWED_STATUSES.join(', ')}` },
-        { status: 400 },
+    if (FINAL_STATUSES.includes(orderData.status)) {
+      console.log(
+        '[SA webhook] Order sudah final, skip update. activationId:',
+        activationId, 'status:', orderData.status,
       );
+      return NextResponse.json({ received: true });
     }
 
-    const orderRef  = adminDb.collection('users').doc(uid).collection('orders').doc(orderId.trim());
-    const orderSnap = await orderRef.get();
-    if (!orderSnap.exists) return NextResponse.json({ error: 'Order tidak ditemukan' }, { status: 404 });
+    const newStatus = mapStatus(code ?? null, rawStatus);
 
-    const order = orderSnap.data()!;
+    // ✅ FIX #1: Jika status CANCELLED, proses refund saldo ke user
+    if (newStatus === 'CANCELLED') {
+      // userRef adalah parent dari subcollection orders (users/{uid})
+      const userRef = orderDoc.ref.parent.parent!;
 
-    // ─── FIX #C1: Ownership check ketat — tidak bergantung pada field userId ──
-    if (order.userId !== undefined && order.userId !== uid) {
-      console.error('[set-status] userId mismatch! uid:', uid, 'order.userId:', order.userId);
-      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
-    }
+      await adminDb.runTransaction(async (t) => {
+        const freshSnap = await t.get(orderDoc.ref);
+        if (!freshSnap.exists) return;
 
-    if (order.provider !== 'smsactivate') {
-      return NextResponse.json({ error: 'Provider mismatch' }, { status: 400 });
-    }
+        const freshData = freshSnap.data()!;
 
-    if (!order.activationId) {
-      return NextResponse.json({ error: 'activationId tidak ditemukan di order' }, { status: 400 });
-    }
-
-    if (FINAL_STATUSES.includes(order.status)) {
-      return NextResponse.json(
-        { error: `Order sudah final (${order.status}), tidak bisa diubah lagi.` },
-        { status: 400 },
-      );
-    }
-
-    if (statusNum === 8) {
-      const createdAt    = parseTimestamp(order.createdAt);
-      const fiveMinutes  = 5 * 60 * 1000;
-      const elapsed      = Date.now() - createdAt;
-
-      if (createdAt > 0 && elapsed < fiveMinutes) {
-        const sisaMs        = fiveMinutes - elapsed;
-        const sisaDetik     = Math.ceil(sisaMs / 1000);
-        const sisaMenit     = Math.floor(sisaDetik / 60);
-        const sisaDetikSisa = sisaDetik % 60;
-        const sisaLabel     = sisaMenit > 0
-          ? `${sisaMenit} menit ${sisaDetikSisa} detik`
-          : `${sisaDetik} detik`;
-
-        return NextResponse.json(
-          {
-            error:       `Pesanan baru bisa dibatalkan setelah 5 menit. Tunggu ${sisaLabel} lagi.`,
-            remainingMs: sisaMs,
-          },
-          { status: 400 },
-        );
-      }
-    }
-
-    // ─── CEK OTP DULU sebelum cancel (status 8) ──────────────────────────────
-    if (statusNum === 8) {
-      try {
-        const checkRes  = await fetch(
-          `${SA_BASE}?action=getStatus&api_key=${SA_KEY}&id=${order.activationId}`,
-        );
-        const checkText = (await checkRes.text()).trim();
-
-        if (checkText.startsWith('STATUS_OK:')) {
-          const otp = checkText.split(':')[1] ?? '';
-          await orderRef.update({
-            otp:       otp,
-            status:    'SUCCESS',
-            updatedAt: FieldValue.serverTimestamp(),
-          });
-          return NextResponse.json(
-            {
-              error:  '⚠️ OTP sudah masuk sebelum dibatalkan. Pesanan tidak jadi dibatalkan.',
-              hasOtp: true,
-              otp,
-            },
-            { status: 409 },
-          );
+        // Re-check di dalam tx — hindari double refund
+        if (FINAL_STATUSES.includes(freshData.status)) {
+          console.log('[SA webhook] Order sudah final di dalam tx, skip refund. activationId:', activationId);
+          return;
         }
-      } catch (checkErr) {
-        console.warn('[set-status] Gagal cek OTP sebelum cancel, lanjutkan cancel:', checkErr);
-      }
-    }
 
-    // ─── FIX #H3: Fresh read tepat sebelum panggil SA ────────────────────────
-    const freshPreCheckSnap = await orderRef.get();
-    if (!freshPreCheckSnap.exists || FINAL_STATUSES.includes(freshPreCheckSnap.data()?.status)) {
-      return NextResponse.json(
-        { error: 'Order sudah berubah status final, tidak bisa diubah lagi.' },
-        { status: 409 },
-      );
-    }
+        const refundAmount = freshData.price ?? 0;
 
-    // ── Panggil SA API ─────────────────────────────────────────────────────────
-    const saRes  = await fetch(
-      `${SA_BASE}?action=setStatus&api_key=${SA_KEY}&id=${order.activationId}&status=${statusNum}`,
-    );
-    const saText = await saRes.text();
+        // Update status order ke CANCELLED
+        t.update(orderDoc.ref, {
+          status:    'CANCELLED',
+          updatedAt: FieldValue.serverTimestamp(),
+        });
 
-    if (!isSASuccess(statusNum, saText)) {
-      console.error(
-        '[set-status] SA menolak request. activationId:', order.activationId,
-        'status:', statusNum, 'saResponse:', saText,
-      );
-      return NextResponse.json(
-        { error: 'Gagal mengubah status di provider. Silakan coba lagi.' },
-        { status: 502 },
-      );
-    }
-
-    const userRef = adminDb.collection('users').doc(uid);
-
-    if (statusNum === 8) {
-      // ── CANCEL: kembalikan saldo + catat refund ke mutasi ──────────────────
-      const displayName  = order.saName || order.serviceId || order.service || 'Nomor';
-      const mutasiRefRef = adminDb.collection('users').doc(uid).collection('transactions').doc();
-
-      try {
-        await adminDb.runTransaction(async (t) => {
-          const freshSnap = await t.get(orderRef);
-          if (!freshSnap.exists) throw new Error('ORDER_NOT_FOUND');
-
-          const freshData = freshSnap.data()!;
-          if (FINAL_STATUSES.includes(freshData.status)) {
-            throw new Error('ORDER_ALREADY_FINAL');
-          }
-
-          const refundPrice = freshData.price ?? 0;
-
-          if (refundPrice === 0) {
-            console.warn(
-              '[set-status] PERINGATAN: freshData.price tidak ada atau 0, refund akan Rp 0. orderId:',
-              orderId,
-            );
-          }
-
-          t.update(orderRef, {
-            status:    'CANCELLED',
-            updatedAt: FieldValue.serverTimestamp(),
-          });
-
+        // ✅ Kembalikan saldo hanya jika ada nilai yang valid
+        if (refundAmount > 0) {
           t.update(userRef, {
-            balance: FieldValue.increment(refundPrice),
+            balance:    FieldValue.increment(refundAmount),
+            totalSpent: FieldValue.increment(-refundAmount),
           });
 
-          t.set(mutasiRefRef, {
+          // Catat mutasi refund
+          // Key unik pakai activationId agar tidak duplikat jika webhook dikirim ulang
+          const mutasiRef = userRef.collection('transactions').doc(`${activationId}_cancel_refund`);
+          t.set(mutasiRef, {
             type:      'refund',
-            amount:    refundPrice,
-            desc:      `Refund: Beli nomor ${displayName.toUpperCase()} (Server 2) dibatalkan`,
+            amount:    refundAmount,
+            desc:      `Refund otomatis - ${(freshData.serviceId ?? freshData.service ?? 'Nomor').toUpperCase()} (Server 2) dibatalkan`,
             status:    'success',
-            orderId,
+            orderId:   orderDoc.id,
+            activationId,
             timestamp: Date.now(),
           });
-        });
-      } catch (txErr: any) {
-        if (txErr.message === 'ORDER_ALREADY_FINAL') {
-          console.error(
-            '[set-status] ⚠️ KRITIS C2: SA berhasil CANCEL tapi order sudah FINAL di Firestore.',
-            'Perlu review manual! orderId:', orderId,
-            'activationId:', order.activationId,
-            'currentStatus:', freshPreCheckSnap.data()?.status,
+
+          console.log(
+            '[SA webhook] Refund berhasil. activationId:', activationId,
+            '| orderId:', orderDoc.id,
+            '| refundAmount:', refundAmount,
           );
-          return NextResponse.json({
-            success:  true,
-            warning:  'Order sudah di status final sebelum cancel diproses. Silakan hubungi support jika ada masalah saldo.',
-            saResponse: 'ok',
-          });
-        }
-        console.error(
-          '[set-status] KRITIS: SA berhasil cancel tapi Firestore transaction gagal!',
-          'orderId:', orderId, 'activationId:', order.activationId, txErr,
-        );
-        throw txErr;
-      }
-
-    } else if (statusNum === 6) {
-      // ── COMPLETE: tandai order selesai ────────────────────────────────────
-      try {
-        await adminDb.runTransaction(async (t) => {
-          const freshSnap = await t.get(orderRef);
-          if (!freshSnap.exists) throw new Error('ORDER_NOT_FOUND');
-
-          const freshData = freshSnap.data()!;
-          if (FINAL_STATUSES.includes(freshData.status)) {
-            throw new Error('ORDER_ALREADY_FINAL');
-          }
-
-          t.update(orderRef, {
-            status:    'COMPLETED',
-            updatedAt: FieldValue.serverTimestamp(),
-          });
-        });
-      } catch (txErr: any) {
-        if (txErr.message === 'ORDER_ALREADY_FINAL') {
-          console.error(
-            '[set-status] ⚠️ KRITIS C2: SA berhasil COMPLETE tapi order sudah FINAL di Firestore.',
-            'orderId:', orderId, 'activationId:', order.activationId,
-          );
-          return NextResponse.json(
-            { error: 'Order sudah final di sistem kami.' },
-            { status: 409 },
+        } else {
+          // Tetap update status meski harga 0 (edge case)
+          console.warn(
+            '[SA webhook] refundAmount 0 atau tidak ada. activationId:', activationId,
+            'orderId:', orderDoc.id,
           );
         }
-        console.error(
-          '[set-status] KRITIS: SA berhasil complete tapi Firestore transaction gagal!',
-          'orderId:', orderId, 'activationId:', order.activationId, txErr,
-        );
-        throw txErr;
-      }
+      });
+
+      return NextResponse.json({ received: true });
     }
 
-    return NextResponse.json({ success: true });
+    // ─── Handle status SUCCESS / PENDING (logika asli, tidak berubah) ─────────
+    const updatePayload: Record<string, unknown> = {
+      sms:       text  ?? null,
+      otp:       code  ?? null,
+      status:    newStatus,
+      updatedAt: FieldValue.serverTimestamp(),
+    };
 
-  } catch (err: any) {
-    console.error('[smsactivate/set-status]', err);
-    return NextResponse.json({ error: err.message }, { status: 500 });
+    if (code) {
+      const saTs = saReceivedAt
+        ? (() => { const t = new Date(saReceivedAt).getTime(); return isNaN(t) ? Date.now() : t; })()
+        : Date.now();
+
+      const newSmsEntry = {
+        text:       text ?? code,
+        otp:        code,
+        receivedAt: saTs,
+        _dedupKey:  `${code}:${text ?? ''}`,
+      };
+
+      await adminDb.runTransaction(async (t) => {
+        const freshSnap = await t.get(orderDoc.ref);
+        if (!freshSnap.exists) return;
+
+        const freshData    = freshSnap.data()!;
+        const currentSms: unknown[] = Array.isArray(freshData.allSms) ? freshData.allSms : [];
+
+        if (FINAL_STATUSES.includes(freshData.status)) return;
+
+        const baseUpdate: Record<string, unknown> = { ...updatePayload };
+
+        if (currentSms.length < ALL_SMS_MAX_ENTRIES) {
+          baseUpdate.allSms = FieldValue.arrayUnion(newSmsEntry);
+        } else {
+          console.warn(
+            '[SA webhook] allSms sudah mencapai batas max', ALL_SMS_MAX_ENTRIES,
+            'untuk activationId:', activationId,
+          );
+        }
+
+        t.update(orderDoc.ref, baseUpdate);
+      });
+
+    } else {
+      await orderDoc.ref.update(updatePayload);
+    }
+
+    console.log(
+      '[SA webhook] activationId:', activationId,
+      '| status:', newStatus,
+      '| otp:', code ? '***' : null,
+    );
+
+    return NextResponse.json({ received: true }, { status: 200 });
+
+  } catch (err: unknown) {
+    console.error('[smsactivate/webhook] Firestore error — SA akan retry:', err);
+    return NextResponse.json({ error: 'Internal error' }, { status: 500 });
   }
 }
