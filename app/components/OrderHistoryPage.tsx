@@ -1146,49 +1146,13 @@ function ActiveOrderItem({ order, compact = false, showToast }) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [order.id, otpData.status]);
 
-  // ✅ FIX: onExpire sekarang update Firestore secara langsung agar order
-  // hilang dari Status Live segera setelah waktu habis, tanpa tunggu polling.
-  const onExpire = useCallback(async () => {
+  // onExpire: hanya update UI lokal — refund ditangani cron job di server
+  // Firestore TIDAK diubah di sini agar cron bisa temukan order dan proses refund
+  const onExpire = useCallback(() => {
     if (statusRef.current !== 'active' && statusRef.current !== 'pending') return;
-    try {
-      if (!auth?.currentUser) return;
-
-      const token = await auth.currentUser.getIdToken();
-      // FIX: Konsisten UPPERCASE untuk semua provider
-      const expiredStatus = 'CANCELLED';
-
-      // Update UI lokal dulu agar terasa responsif
-      setOtpData(prev => ({ ...prev, status: expiredStatus }));
-      statusRef.current = expiredStatus;
-
-      if (order.provider === 'smsactivate') {
-        // FIX: Server 2 — cancel + refund via set-status (status 8 = cancel)
-        fetch('/api/smsactivate/set-status', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-          body: JSON.stringify({ orderId: order.id, status: 8 }),
-        }).catch(err => console.warn('[onExpire] smsactivate set-status gagal:', err?.message));
-      } else {
-        // FIX: Server 1 (5sim) — trigger timeout-order => cancel + refund saldo
-        fetch('/api/timeout-order', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-          body: JSON.stringify({ orderId: order.id }),
-        }).catch(err => console.warn('[onExpire] timeout-order gagal:', err?.message));
-      }
-
-      // Sync status ke Firestore agar hilang dari activeOrders filter
-      if (db) {
-        try {
-          await updateDoc(
-            doc(db, 'users', auth.currentUser.uid, 'orders', order.id),
-            { status: expiredStatus }
-          );
-        } catch { /* silent — UI sudah update */ }
-      }
-    } catch {
-      // Jika gagal, UI sudah terupdate — tidak perlu error toast
-    }
+    const expiredStatus = order.provider === 'smsactivate' ? 'CANCELLED' : 'canceled';
+    setOtpData(prev => ({ ...prev, status: expiredStatus }));
+    statusRef.current = expiredStatus;
   }, [order.id, order.provider]);
 
   // ✅ FIX: Jika order tidak punya expiresAt (umum pada Server 2/smsactivate),
@@ -1209,7 +1173,7 @@ function ActiveOrderItem({ order, compact = false, showToast }) {
 
   const { formatTime, seconds } = useCountdown(
     effectiveExpiresAt,
-    otpData.status === 'active' || otpData.status === 'pending', // ✅ FIX: Server 2 mulai 'pending'
+    otpData.status === 'active',
     onExpire
   );
 
@@ -1223,10 +1187,14 @@ function ActiveOrderItem({ order, compact = false, showToast }) {
       if (order.provider === 'smsactivate') {
         // SMS-Activate: cancel via set-status endpoint
         // ✅ SECURITY FIX: Tambahkan pengecekan res.ok — sebelumnya error diabaikan diam-diam.
-        const saRes = await fetch('/api/smsactivate/set-status', {
+        const saRes = await fetch('/api/smsactivate/cancel', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-          body: JSON.stringify({ orderId: order.id, status: 8 }),
+          body: JSON.stringify({
+            activationId: order.activationId ?? order.id,
+            orderId:      order.id,
+            userId:       auth.currentUser.uid,
+          }),
         });
         if (!saRes.ok) {
           const saData = await saRes.json().catch(() => ({}));
@@ -1247,13 +1215,6 @@ function ActiveOrderItem({ order, compact = false, showToast }) {
       // ikut berubah via real-time listener. Tanpa ini, order tetap muncul di
       // "Status Live" karena Firestore masih menyimpan status 'active'.
       // Error permission di-silent karena status lokal sudah diupdate via setOtpData.
-      // FIX: Deklarasikan canceledStatus DI ATAS sebelum dipakai (fix ReferenceError TDZ)
-      const canceledStatus = order.provider === 'smsactivate' ? 'CANCELLED' : 'CANCELLED';
-
-      // FIX: Update statusRef SYNCHRONOUS sebelum setOtpData agar poll in-flight
-      // tidak lolos guard dan tidak trigger double toast
-      statusRef.current = canceledStatus;
-
       if (db) {
         try {
           await updateDoc(
@@ -1262,6 +1223,13 @@ function ActiveOrderItem({ order, compact = false, showToast }) {
           );
         } catch (_) { /* silent — tidak ganggu user jika Firestore rules belum allow */ }
       }
+
+      // ✅ FIX DOUBLE TOAST: Update statusRef SYNCHRONOUS sebelum setOtpData.
+      // Tanpa ini, poll yang sedang in-flight bisa selesai setelah cancel di-click
+      // tapi sebelum statusRef diupdate via useEffect — menyebabkan handleData
+      // lolos guard dan menampilkan toast OTP kedua (dari SMS yang datang bersamaan).
+      const canceledStatus = order.provider === 'smsactivate' ? 'CANCELLED' : 'canceled';
+      statusRef.current = canceledStatus;
 
       showToast('Pesanan dibatalkan. Saldo dikembalikan.', 'info');
       setOtpData(prev => ({ ...prev, status: canceledStatus, otp: null }));
@@ -1436,25 +1404,41 @@ function ActiveOrderItem({ order, compact = false, showToast }) {
         )}
 
         {/* Action buttons — dibedakan secara visual */}
-        {isActive && (
-          <div className="flex gap-3">
-            {/* Salin Nomor — secondary, full width */}
-            <button
-              onClick={() => copyToClipboardHelper(order.number || order.phone || '', showToast)}
-              className="flex-1 py-3 rounded-xl border border-white/10 text-gray-400 hover:text-white hover:border-white/20 hover:bg-white/5 transition-all font-bold text-sm flex items-center justify-center gap-2"
-            >
-              <Copy className="w-4 h-4" /> Salin Nomor
-            </button>
-            {/* Batalkan — danger outline, hanya ikon + label pendek */}
-            <button
-              onClick={handleCancel}
-              disabled={isCanceling}
-              className="px-4 py-3 rounded-xl border border-red-900/40 text-red-500/70 hover:text-red-400 hover:border-red-500/40 hover:bg-red-950/30 transition-all font-bold text-sm flex items-center justify-center gap-1.5 disabled:opacity-40"
-            >
-              {isCanceling ? <Loader2 className="w-4 h-4 animate-spin" /> : <><XCircle className="w-4 h-4" /> Batal</>}
-            </button>
-          </div>
-        )}
+        {isActive && (() => {
+          // Server 2 (smsactivate): lock cancel 5 menit pertama
+          const isSA = order.provider === 'smsactivate';
+          const canCancelAt = isSA ? (orderTimestampMs || 0) + 5 * 60 * 1000 : 0;
+          const canCancel = !isSA || Date.now() >= canCancelAt;
+          const secondsLeft = Math.max(0, Math.ceil((canCancelAt - Date.now()) / 1000));
+          const mm = String(Math.floor(secondsLeft / 60)).padStart(2, '0');
+          const ss = String(secondsLeft % 60).padStart(2, '0');
+
+          return (
+            <div className="flex gap-3">
+              {/* Salin Nomor — secondary, full width */}
+              <button
+                onClick={() => copyToClipboardHelper(order.number || order.phone || '', showToast)}
+                className="flex-1 py-3 rounded-xl border border-white/10 text-gray-400 hover:text-white hover:border-white/20 hover:bg-white/5 transition-all font-bold text-sm flex items-center justify-center gap-2"
+              >
+                <Copy className="w-4 h-4" /> Salin Nomor
+              </button>
+              {/* Batalkan — danger outline, hanya ikon + label pendek */}
+              <button
+                onClick={handleCancel}
+                disabled={isCanceling || !canCancel}
+                title={!canCancel ? `Bisa dibatalkan setelah ${mm}:${ss}` : ''}
+                className="px-4 py-3 rounded-xl border border-red-900/40 text-red-500/70 hover:text-red-400 hover:border-red-500/40 hover:bg-red-950/30 transition-all font-bold text-sm flex items-center justify-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                {isCanceling
+                  ? <Loader2 className="w-4 h-4 animate-spin" />
+                  : !canCancel
+                  ? <><XCircle className="w-4 h-4" /> {mm}:{ss}</>
+                  : <><XCircle className="w-4 h-4" /> Batal</>
+                }
+              </button>
+            </div>
+          );
+        })()}
       </div>
     </Card>
   );
