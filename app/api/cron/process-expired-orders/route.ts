@@ -137,8 +137,9 @@ async function checkOtpSmsActivate(activationId: string): Promise<{
     return { hasOtp: false, otp: null, shouldCancel: false, alreadyCancelled: false };
 
   } catch (err: any) {
-    console.warn('[cron] Gagal cek OTP SA, skip order ini:', err.message);
-    return { hasOtp: false, otp: null, shouldCancel: false, alreadyCancelled: false };
+    console.warn('[cron] Gagal cek OTP SA, lanjut refund:', err.message);
+    // Kalau tidak bisa cek SA — order sudah expired, tetap refund
+    return { hasOtp: false, otp: null, shouldCancel: true, alreadyCancelled: true };
   }
 }
 
@@ -272,7 +273,8 @@ export async function GET(req: NextRequest) {
     for (const doc of allDocs) {
       const data     = doc.data();
       const orderId  = doc.id;
-      const provider = (data.provider ?? '').toLowerCase(); // '5sim' atau 'smsactivate'
+      // Fallback: cek field server juga kalau provider kosong
+      const provider = (data.provider ?? data.server ?? '').toLowerCase();
 
       try {
         // ── SERVER 1: 5sim ──────────────────────────────────────────────────
