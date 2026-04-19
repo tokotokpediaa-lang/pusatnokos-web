@@ -2,7 +2,7 @@
   "crons": [
     {
       "path": "/api/cron/process-expired-orders",
-      "schedule": "*/2 * * * *"
+      "schedule": "0 0 * * *"
     }
   ]
 }
